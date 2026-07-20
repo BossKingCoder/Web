@@ -1,0 +1,3168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0E1B3D">
+<title>Shaurya's Workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0B1530;
+    --ink-deep:#070D22;
+    --panel:#16234F;
+    --panel-raised:#1D2C5C;
+    --line:#243466;
+    --brass:#E0AC3F;
+    --brass-dim:#a87f28;
+    --brass-soft:#F0CE85;
+    --signal:#6FE0A0;
+    --slate:#AEB9D4;
+    --slate-dim:#6C7BA3;
+    --accent-teal:#4FB8C4;
+    --accent-orange:#E0875C;
+    --accent-violet:#9B85D6;
+  }
+  *{box-sizing:border-box;}
+
+  /* ---- Scrollbar theming ---- */
+  html{scrollbar-color:var(--scroll-accent, var(--brass-dim)) var(--ink); scrollbar-width:thin;}
+  ::-webkit-scrollbar{width:11px;height:11px;}
+  ::-webkit-scrollbar-track{background:var(--ink);}
+  ::-webkit-scrollbar-thumb{
+    background:var(--scroll-accent, var(--brass-dim));border-radius:6px;
+    border:2px solid var(--ink);
+    transition:background .25s ease;
+  }
+  ::-webkit-scrollbar-thumb:hover{background:var(--brass);}
+  ::-webkit-scrollbar-corner{background:var(--ink);}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;background:var(--ink);color:var(--slate);
+    font-family:'IBM Plex Sans',sans-serif;min-height:100vh;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.035) 0px, rgba(224,172,63,0.035) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.03) 0px, rgba(224,172,63,0.03) 1px, transparent 1px, transparent 28px);
+  }
+  h1,h2,h3{font-family:'Bebas Neue',sans-serif;color:#F5F1E8;margin:0;letter-spacing:.03em;font-weight:400;}
+  a{color:inherit;}
+  ::selection{background:rgba(224,172,63,0.35);color:#F5F1E8;}
+
+  /* ---- Top nav ---- */
+  nav{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 44px;border-bottom:1px solid var(--line);
+    background:linear-gradient(90deg, var(--panel) 0%, var(--ink) 65%, #1e1809 100%);
+    position:sticky;top:0;z-index:10;
+    backdrop-filter:blur(6px);
+  }
+  .brand-name{
+    font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;
+    letter-spacing:.05em;
+  }
+
+  .nav-links{display:flex;gap:28px;}
+
+  /* ---- Global search ---- */
+  .nav-search-wrap{position:relative;flex:1;max-width:360px;margin:0 24px;}
+  .nav-search-input{
+    width:100%;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:8px 14px;border-radius:20px;font-size:13px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .nav-search-input::placeholder{color:var(--slate-dim);}
+  .nav-search-input:focus{outline:none;border-color:var(--brass);}
+  .nav-search-results{
+    display:none;position:absolute;top:calc(100% + 8px);left:0;right:0;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    max-height:360px;overflow-y:auto;z-index:20;
+    box-shadow:0 12px 28px rgba(0,0,0,0.4);
+  }
+  .search-result-item{
+    padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--line);
+    display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  }
+  .search-result-item:last-child{border-bottom:none;}
+  .search-result-item:hover{background:var(--panel-raised);}
+  .search-result-type{
+    font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:var(--brass-soft);
+    text-transform:uppercase;letter-spacing:.08em;border:1px solid rgba(224,172,63,0.3);
+    border-radius:4px;padding:1px 6px;flex-shrink:0;
+  }
+  .search-result-label{font-size:13.5px;color:#F5F1E8;}
+  .search-result-sub{font-size:11.5px;color:var(--slate-dim);width:100%;}
+  .search-result-empty{padding:14px;font-size:13px;color:var(--slate-dim);text-align:center;}
+  .nav-link{
+    position:relative;font-size:13px;color:var(--slate-dim);cursor:pointer;
+    letter-spacing:.04em;text-transform:uppercase;padding:4px 0;
+    transition:color .15s ease;
+  }
+  .nav-link::after{
+    content:'';position:absolute;left:0;right:0;bottom:-2px;height:1.5px;
+    background:var(--brass);transform:scaleX(0);transform-origin:left;
+    transition:transform .2s ease;
+  }
+  .nav-link.active{color:#F5F1E8;}
+  .nav-link.active::after{transform:scaleX(1);}
+  .nav-link:hover:not(.active){color:var(--slate);}
+
+  /* ---- Views ---- */
+  .view{
+    display:none;
+    opacity:0;
+    transform:translateY(18px);
+    transition:opacity .38s ease, transform .38s ease;
+  }
+  .view.visible{display:block;}
+  .view.visible.active{opacity:1;transform:translateY(0);}
+  @media (prefers-reduced-motion: reduce){
+    .view{transition:none;}
+  }
+
+  /* ---- Hub background atmosphere (Home, Study, Entertainment, Game hubs only) ---- */
+  #view-home, #view-study, #view-entertainment, #view-games{
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.028) 0px, rgba(224,172,63,0.028) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.022) 0px, rgba(224,172,63,0.022) 1px, transparent 1px, transparent 28px),
+      radial-gradient(ellipse 800px 400px at 85% 0%, rgba(224,172,63,0.05), transparent 60%);
+    min-height:100vh;
+  }
+
+  /* ---- Per-hub accent colors (trial) ---- */
+  #view-study h2{color:var(--accent-orange);}
+  #view-study .cursor{background:var(--accent-orange);}
+  #view-study .hub-icon svg{stroke:var(--accent-orange);}
+  #view-study .hub-card:hover{border-color:var(--accent-orange);box-shadow:0 10px 24px rgba(224,135,92,0.22);}
+
+  #view-entertainment h2{color:var(--accent-violet);}
+  #view-entertainment .cursor{background:var(--accent-violet);}
+  #view-entertainment .hub-icon svg{stroke:var(--accent-violet);}
+  #view-entertainment .hub-card:hover{border-color:var(--accent-violet);box-shadow:0 10px 24px rgba(155,133,214,0.22);}
+
+  #view-games h2{color:var(--accent-teal);}
+  #view-games .cursor{background:var(--accent-teal);}
+  #view-games .hub-icon svg{stroke:var(--accent-teal);}
+  #view-games .hub-card:hover{border-color:var(--accent-teal);box-shadow:0 10px 24px rgba(79,184,196,0.22);}
+
+  /* ---- Hero ---- */
+  .hero{
+    position:relative;overflow:hidden;
+    padding:120px 44px 130px 44px;
+    background:
+      radial-gradient(ellipse 900px 520px at 12% 0%, rgba(224,172,63,0.20), transparent 62%),
+      linear-gradient(135deg, var(--ink-deep) 0%, #142352 32%, #26305e 58%, #55482c 82%, #a87f28 100%);
+    background-size:130% 130%;
+    animation:heroDrift 22s ease-in-out infinite alternate;
+    text-align:left;
+  }
+  @keyframes heroDrift{
+    0%{background-position:0% 0%, 0% 0%;}
+    100%{background-position:6% 4%, 6% 4%;}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .hero{animation:none;}
+  }
+
+  .hero::after{
+    content:'';position:absolute;inset:0;pointer-events:none;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.055) 0px, rgba(224,172,63,0.055) 1px, transparent 1px, transparent 32px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.045) 0px, rgba(224,172,63,0.045) 1px, transparent 1px, transparent 32px);
+    mask-image:linear-gradient(180deg, black, transparent 88%);
+  }
+
+  .hero-inner{max-width:660px;position:relative;z-index:1;}
+  .hero-eyebrow{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--brass-soft);
+    letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px;
+    display:flex;align-items:center;gap:10px;
+  }
+  .hero-eyebrow .rule{width:26px;height:1px;background:var(--brass-dim);}
+
+  .hero h1{
+    font-size:64px;line-height:1.03;margin-bottom:16px;
+    background:linear-gradient(90deg, #F5F1E8 0%, #F5F1E8 58%, var(--brass-soft) 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .cursor{
+    display:inline-block;width:8px;height:44px;background:var(--brass-soft);
+    margin-left:6px;vertical-align:-6px;
+    animation:blink 1.1s steps(1) infinite;
+  }
+  .cursor.small{width:6px;height:24px;vertical-align:-4px;margin-left:5px;}
+
+  .count-pop{
+    display:inline-block;
+    animation:countPop 0.35s ease;
+  }
+  @keyframes countPop{
+    0%{transform:scale(1);}
+    30%{transform:scale(1.3);color:var(--brass-soft);}
+    100%{transform:scale(1);}
+  }
+  @media (prefers-reduced-motion: reduce){.count-pop{animation:none;}}
+  @keyframes blink{0%,49%{opacity:1;}50%,100%{opacity:0;}}
+  @media (prefers-reduced-motion: reduce){.cursor{animation:none;opacity:1;}}
+
+  .hero .sub{font-size:15.5px;color:var(--slate);line-height:1.65;max-width:460px;margin-bottom:30px;}
+
+  .status-line{
+    display:inline-flex;align-items:center;gap:10px;
+    font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--slate);
+    padding:9px 16px;border:1px solid rgba(224,172,63,0.3);border-radius:20px;
+    background:rgba(11,21,48,0.4);
+  }
+  .status-dot{
+    width:7px;height:7px;border-radius:50%;background:var(--signal);
+    box-shadow:0 0 0 3px rgba(111,224,160,0.18);
+    animation:pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  @media (prefers-reduced-motion: reduce){.status-dot{animation:none;}}
+
+  /* ---- Widgets ---- */
+  .widget-row{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap;}
+  .widget{
+    background:rgba(11,21,48,0.45);border:1px solid rgba(224,172,63,0.22);
+    border-radius:10px;padding:16px 20px;min-width:190px;
+    backdrop-filter:blur(6px);
+  }
+  .widget-label{
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;
+  }
+  .widget-main{font-family:'Bebas Neue',sans-serif;font-size:28px;color:#F5F1E8;letter-spacing:.02em;line-height:1;}
+  .widget-sub{font-size:12px;color:var(--slate-dim);margin-top:6px;font-family:'IBM Plex Mono',monospace;}
+
+  .fact-card{
+    margin-top:16px;max-width:520px;
+    background:rgba(11,21,48,0.4);border:1px solid rgba(224,172,63,0.18);
+    border-radius:10px;padding:14px 18px;
+    backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,0.22);
+  }
+  .fact-label{
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px;
+  }
+  .fact-text-wrap{position:relative;min-height:56px;}
+  .fact-text{
+    position:absolute;top:0;left:0;right:0;
+    font-size:13px;color:var(--slate);line-height:1.55;
+    opacity:0;transition:opacity .6s ease;
+  }
+  .fact-text.shown{opacity:1;}
+
+  /* ---- Body ---- */
+  main{padding:56px 44px;max-width:1100px;margin:0 auto;min-height:60vh;}
+  .view-head{margin-bottom:22px;}
+  .view-head h2{font-size:34px;margin-bottom:8px;}
+  .view-head .view-sub{font-size:13.5px;color:var(--slate-dim);}
+  .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;}
+  .clear-btn{
+    flex-shrink:0;background:var(--panel);border:1px solid var(--line);color:var(--slate);
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.03em;
+    padding:8px 14px;border-radius:6px;cursor:pointer;margin-top:4px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .clear-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .clear-btn.active{border-color:var(--brass);color:#F5F1E8;background:rgba(224,172,63,0.12);}
+  .placeholder-note{
+    font-size:13px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;
+    border:1px dashed var(--line);border-radius:8px;padding:20px;text-align:center;
+    letter-spacing:.02em;
+  }
+
+  .hub-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:14px;}
+  .hub-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:20px;cursor:pointer;transition:border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    height:150px;display:flex;flex-direction:column;justify-content:flex-start;
+    opacity:0;
+    animation:hubCardIn 0.45s ease forwards;
+  }
+  .hub-card:nth-child(1){animation-delay:0.08s;}
+  .hub-card:nth-child(2){animation-delay:0.22s;}
+  .hub-card:nth-child(3){animation-delay:0.36s;}
+  .hub-card:nth-child(4){animation-delay:0.50s;}
+  .hub-card:nth-child(5){animation-delay:0.64s;}
+  .hub-card:nth-child(6){animation-delay:0.78s;}
+  @keyframes hubCardIn{
+    from{opacity:0;transform:translateY(14px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .hub-card{animation:none;opacity:1;}
+  }
+  .hub-card:hover{border-color:var(--brass-dim);transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,0.28);}
+  .hub-card-title{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.03em;margin-bottom:6px;}
+  .hub-card-desc{font-size:12.5px;color:var(--slate-dim);line-height:1.5;}
+  .hub-icon{margin-bottom:10px;}
+  .hub-icon svg{
+    width:22px;height:22px;fill:none;stroke:var(--brass-soft);
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;
+  }
+
+  /* ---- Chat ---- */
+  #chatlog{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    height:440px;overflow-y:auto;padding:20px;margin-bottom:14px;
+  }
+  .msg{margin-bottom:16px;font-size:14px;line-height:1.6;}
+  .msg .who{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--slate-dim);margin-bottom:4px;font-family:'IBM Plex Mono',monospace;}
+  .msg.user .who{color:var(--brass);}
+  .msg.assistant .who{color:var(--signal);}
+  .msg .body{color:#F5F1E8;white-space:pre-wrap;}
+  .chat-input-row{display:flex;gap:8px;}
+  .chat-input-row textarea{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:12px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+    resize:none;height:46px;
+  }
+  .chat-input-row textarea:focus{outline:none;border-color:var(--brass);}
+  .chat-input-row button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 22px;
+    border-radius:6px;font-weight:600;cursor:pointer;
+  }
+  .chat-input-row button:disabled{opacity:0.5;cursor:default;}
+  .typing{color:var(--slate-dim);font-size:13px;font-style:italic;display:flex;align-items:center;gap:6px;}
+  .typing-dots{display:inline-flex;gap:3px;}
+  .typing-dots span{
+    width:5px;height:5px;border-radius:50%;background:var(--slate-dim);display:inline-block;
+    animation:typingBounce 1.2s infinite ease-in-out;
+  }
+  .typing-dots span:nth-child(1){animation-delay:0s;}
+  .typing-dots span:nth-child(2){animation-delay:0.15s;}
+  .typing-dots span:nth-child(3){animation-delay:0.3s;}
+  @keyframes typingBounce{
+    0%,60%,100%{transform:translateY(0);opacity:0.4;}
+    30%{transform:translateY(-4px);opacity:1;}
+  }
+
+  .msg.msg-in{animation:msgIn 0.35s ease;}
+  @keyframes msgIn{
+    from{opacity:0;transform:translateY(8px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .msg.msg-in{animation:none;}
+    .typing-dots span{animation:none;opacity:1;}
+  }
+
+  /* ---- Shared skeleton loading shimmer ---- */
+  .skeleton{
+    display:block;border-radius:4px;height:14px;
+    background:linear-gradient(90deg, var(--panel-raised) 25%, rgba(242,238,228,0.08) 37%, var(--panel-raised) 63%);
+    background-size:400% 100%;
+    animation:skeletonShimmer 1.4s ease infinite;
+  }
+  @keyframes skeletonShimmer{
+    0%{background-position:100% 0;}
+    100%{background-position:0 0;}
+  }
+  @media (prefers-reduced-motion: reduce){.skeleton{animation:none;}}
+
+  /* ---- Focus Timer ---- */
+  .timer-main{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:calc(100vh - 180px);text-align:center;
+  }
+  .timer-ring-wrap{
+    position:relative;width:min(64vw, 380px);height:min(64vw, 380px);
+    margin-bottom:34px;
+  }
+  .timer-ring{width:100%;height:100%;transform:rotate(-90deg);}
+  .ring-track{fill:none;stroke:var(--panel-raised);stroke-width:10;}
+  .ring-progress{
+    fill:none;stroke:var(--brass);stroke-width:10;stroke-linecap:round;
+    transition:stroke-dashoffset 1s linear, stroke .3s ease;
+  }
+  .ring-progress.break{stroke:var(--signal);}
+  .timer-center{
+    position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+  }
+  .timer-phase{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--brass-soft);margin-bottom:10px;
+  }
+  .timer-phase.break{color:var(--signal);}
+  .timer-display{
+    font-family:'Bebas Neue',sans-serif;font-size:clamp(48px, 9vw, 76px);color:#F5F1E8;letter-spacing:.04em;
+    line-height:1;
+  }
+  .timer-controls{display:flex;gap:10px;justify-content:center;margin-bottom:24px;}
+  .timer-btn{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;letter-spacing:.02em;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .timer-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .timer-btn.primary{background:var(--brass);border-color:var(--brass);color:var(--ink);font-weight:600;}
+  .timer-btn.primary:hover{background:var(--brass-soft);}
+  .timer-sessions{font-size:12.5px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;}
+
+  /* ---- Riddles & Jokes ---- */
+  .riddle-buttons{display:flex;gap:10px;flex-shrink:0;margin-top:4px;}
+  .riddle-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:32px 34px;max-width:600px;
+    box-shadow:0 8px 22px rgba(0,0,0,0.24);
+  }
+  .riddle-label{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;min-height:14px;
+  }
+  .riddle-text{font-size:17px;color:#F5F1E8;line-height:1.6;margin-bottom:20px;}
+  .punchline{display:block;margin-top:10px;opacity:0;transition:opacity .6s ease;color:var(--brass-soft);}
+  .punchline.shown{opacity:1;}
+  .riddle-answer-row{display:flex;gap:8px;margin-bottom:14px;}
+
+  /* ---- Quick add (shared input+button row) ---- */
+  .quick-add{display:flex;gap:8px;margin-bottom:18px;}
+  .quick-add input{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .quick-add input:focus{outline:none;border-color:var(--brass);}
+  .quick-add button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 18px;
+    border-radius:6px;font-weight:600;cursor:pointer;font-size:14px;
+  }
+  .quick-add button:hover{background:var(--brass-soft);}
+
+  /* ---- Small stat boxes (used by Reaction Test) ---- */
+  .clicker-stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
+  .cs-label{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;}
+  .cs-value{font-family:'Bebas Neue',sans-serif;font-size:24px;color:#F5F1E8;letter-spacing:.02em;}
+
+  /* ---- Decision Wheel ---- */
+  .wheel-stage{position:relative;display:flex;justify-content:center;align-items:center;margin:30px 0;}
+  .wheel-pointer{
+    position:absolute;top:-6px;left:50%;transform:translateX(-50%);z-index:2;
+    width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;
+    border-top:22px solid var(--brass-soft);
+  }
+  .wheel-wrap{width:280px;height:280px;border-radius:50%;box-shadow:0 8px 30px rgba(0,0,0,0.4);}
+  .wheel{
+    width:100%;height:100%;border-radius:50%;position:relative;
+    transition:transform 4s cubic-bezier(0.15, 0.8, 0.1, 1);
+    border:4px solid var(--panel);
+  }
+  .wheel-label{
+    position:absolute;top:50%;left:50%;transform-origin:0 0;
+    font-family:'IBM Plex Mono',monospace;font-size:11px;color:#1a1a1a;font-weight:600;
+    white-space:nowrap;
+  }
+
+  /* ---- Simple list rows (used by Decision Wheel options) ---- */
+  .task-list{list-style:none;padding:0;margin:0 0 16px 0;}
+  .task-item{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 4px;border-bottom:1px solid var(--line);font-size:14px;
+  }
+  .task-item:last-child{border-bottom:none;}
+  .task-text{color:#F5F1E8;}
+  .task-del{color:var(--slate-dim);cursor:pointer;font-size:16px;padding:2px 8px;flex-shrink:0;}
+  .task-del:hover{color:var(--danger, #C1604A);}
+
+  /* ---- Simple button grid (used by Which X quiz options) ---- */
+  .upgrade-grid{display:grid;grid-template-columns:1fr;gap:8px;margin-top:14px;}
+
+  /* ---- Quick Calculator ---- */
+  .calc-display{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:24px 20px;text-align:right;font-family:'Bebas Neue',sans-serif;
+    font-size:40px;color:#F5F1E8;margin-bottom:14px;max-width:340px;
+    overflow-x:auto;white-space:nowrap;
+  }
+  .calc-grid{display:grid;grid-template-columns:repeat(4, 76px);gap:8px;max-width:340px;}
+  .calc-btn{
+    background:var(--panel-raised);border:1px solid var(--line);color:#F5F1E8;
+    border-radius:8px;padding:16px 0;font-size:18px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;transition:border-color .1s ease;
+  }
+  .calc-btn:hover{border-color:var(--brass-dim);}
+  .calc-btn.op{color:var(--brass-soft);}
+  .calc-btn.equals{background:var(--brass);color:var(--ink);font-weight:600;}
+  .calc-btn.equals:hover{background:var(--brass-soft);}
+  .calc-btn.wide{grid-column:span 2;}
+
+  /* ---- Unit Converter ---- */
+  .convert-row{display:flex;gap:10px;max-width:400px;margin-bottom:10px;}
+  .convert-row select, .convert-row input{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .convert-row select:focus, .convert-row input:focus{outline:none;border-color:var(--brass);}
+  .convert-arrow{font-size:18px;color:var(--slate-dim);text-align:center;max-width:400px;margin-bottom:10px;}
+  .convert-result{
+    flex:1;background:var(--panel-raised);border:1px solid var(--line);color:var(--brass-soft);
+    padding:11px 14px;border-radius:6px;font-family:'Bebas Neue',sans-serif;font-size:20px;
+  }
+
+  /* ---- Formula Sheet ---- */
+  .formula-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(240px,1fr));gap:12px;}
+  .formula-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 4px 12px rgba(0,0,0,0.18);}
+  .formula-name{font-family:'Bebas Neue',sans-serif;font-size:16px;color:#F5F1E8;letter-spacing:.02em;margin-bottom:8px;}
+  .formula-expr{font-family:'IBM Plex Mono',monospace;font-size:15px;color:var(--brass-soft);margin-bottom:6px;}
+  .formula-note{font-size:11.5px;color:var(--slate-dim);line-height:1.4;}
+  .formula-subject-tag{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--brass-soft);
+    text-transform:uppercase;letter-spacing:.08em;
+    border:1px solid rgba(224,172,63,0.3);border-radius:4px;padding:2px 8px;
+  }
+  .formula-tags{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;}
+  .formula-tier-tag{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;
+    text-transform:uppercase;letter-spacing:.08em;border-radius:4px;padding:2px 8px;
+  }
+  .formula-tier-tag.tier-ks3{color:var(--signal);border:1px solid rgba(111,224,160,0.35);}
+  .formula-tier-tag.tier-gcse{color:var(--brass-soft);border:1px solid rgba(224,172,63,0.35);}
+  .formula-tier-tag.tier-alevel{color:#e08a7a;border:1px solid rgba(224,138,122,0.35);}
+
+  /* ---- Vocabulary Builder ---- */
+  .vocab-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;position:relative;box-shadow:0 4px 12px rgba(0,0,0,0.18);}
+  .vocab-word{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.02em;margin-bottom:8px;padding-right:24px;}
+  .vocab-def{font-size:13px;color:var(--slate);line-height:1.5;margin-bottom:8px;}
+  .vocab-example{font-size:12.5px;color:var(--slate-dim);font-style:italic;line-height:1.5;}
+
+  /* ---- Ambient Sounds ---- */
+  .sound-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(230px,1fr));gap:14px;}
+  .sound-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.18);
+  }
+  .sound-card.playing{border-color:rgba(224,135,92,0.4);}
+  .sound-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .sound-card-title{font-family:'Bebas Neue',sans-serif;font-size:18px;color:#F5F1E8;letter-spacing:.02em;}
+  .sound-toggle{
+    width:36px;height:36px;border-radius:50%;background:var(--panel-raised);border:1px solid var(--line);
+    color:var(--slate);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;
+    flex-shrink:0;transition:background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .sound-toggle:hover{border-color:var(--accent-orange);color:#F5F1E8;}
+  .sound-toggle.playing{background:var(--accent-orange);border-color:var(--accent-orange);color:var(--ink);}
+  .sound-volume{width:100%;accent-color:var(--accent-orange);}
+  .vocab-del{position:absolute;top:14px;right:14px;color:var(--slate-dim);cursor:pointer;font-size:16px;}
+  .vocab-del:hover{color:var(--danger, #C1604A);}
+  .riddle-answer-row input{
+    flex:1;background:var(--ink);border:1px solid var(--line);color:#F5F1E8;
+    padding:10px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .riddle-answer-row input:focus{outline:none;border-color:var(--brass);}
+  .riddle-feedback{font-size:13px;font-family:'IBM Plex Mono',monospace;color:var(--slate-dim);min-height:18px;}
+  .riddle-feedback.incorrect{color:var(--danger, #C1604A);}
+
+  /* ---- Games (shared) ---- */
+  .game-score{
+    font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--brass-soft);
+    background:var(--panel);border:1px solid var(--line);border-radius:6px;
+    padding:8px 14px;flex-shrink:0;margin-top:4px;
+  }
+  .game-stage{position:relative;display:flex;flex-direction:column;align-items:center;}
+  .game-overlay{
+    position:absolute;inset:0;background:rgba(11,21,48,0.85);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+    border-radius:8px;
+  }
+  .game-overlay-text{font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F5F1E8;letter-spacing:.03em;text-align:center;padding:0 20px;}
+  #snakeCanvas{background:var(--panel);border:1px solid var(--line);border-radius:8px;display:block;}
+
+  .grid-2048{
+    display:grid;grid-template-columns:repeat(4, 76px);grid-template-rows:repeat(4, 76px);
+    gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-2048{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--ink);
+    background:var(--panel-raised);color:transparent;transition:background .1s ease;
+  }
+  .tile-2048[data-v]{color:#2A2410;}
+  .tile-2048[data-v="2"]{background:#EDE6D6;}
+  .tile-2048[data-v="4"]{background:#E5D9B6;}
+  .tile-2048[data-v="8"]{background:var(--brass-soft);color:#2A2410;}
+  .tile-2048[data-v="16"]{background:var(--brass);color:#2A2410;}
+  .tile-2048[data-v="32"]{background:#d99a3f;color:#fff;}
+  .tile-2048[data-v="64"]{background:#c9762c;color:#fff;}
+  .tile-2048[data-v="128"]{background:#c15a2c;color:#fff;font-size:22px;}
+  .tile-2048[data-v="256"]{background:#b84a2c;color:#fff;font-size:22px;}
+  .tile-2048[data-v="512"]{background:var(--signal);color:#08281a;font-size:22px;}
+  .tile-2048[data-v="1024"]{background:#3f9a6e;color:#fff;font-size:19px;}
+  .tile-2048[data-v="2048"]{background:#c9a24b;color:#fff;font-size:19px;box-shadow:0 0 16px rgba(224,172,63,0.7);}
+
+  .grid-puzzle15{
+    display:grid;grid-template-columns:repeat(4, 76px);grid-template-rows:repeat(4, 76px);
+    gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-puzzle15{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    font-family:'Bebas Neue',sans-serif;font-size:24px;color:var(--ink);
+    background:var(--brass);cursor:pointer;transition:background .1s ease;
+  }
+  .tile-puzzle15:hover{background:var(--brass-soft);}
+  .tile-puzzle15.empty{background:transparent;cursor:default;}
+
+  .reaction-stats{display:grid;grid-template-columns:repeat(2, minmax(120px,1fr));gap:12px;max-width:300px;margin-bottom:24px;}
+  .reaction-box{
+    width:100%;max-width:520px;height:260px;border-radius:12px;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    background:var(--panel);border:1px solid var(--line);
+    font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F5F1E8;letter-spacing:.03em;
+    transition:background .15s ease;user-select:none;
+  }
+  .reaction-box.waiting{background:#5a2a2a;}
+  .reaction-box.go{background:var(--signal);color:#08281a;}
+  .reaction-box.early{background:#5a2a2a;}
+
+  .grid-ttt{
+    display:grid;grid-template-columns:repeat(3, 96px);grid-template-rows:repeat(3, 96px);
+    gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-ttt{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    background:var(--panel-raised);cursor:pointer;
+    font-family:'Bebas Neue',sans-serif;font-size:44px;
+    transition:background .1s ease;
+  }
+  .tile-ttt:hover{background:#243668;}
+  .tile-ttt.x{color:var(--brass-soft);}
+  .tile-ttt.o{color:var(--signal);}
+  .tile-ttt.filled{cursor:default;}
+  .tile-ttt.filled:hover{background:var(--panel-raised);}
+
+  .chain-display{
+    display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:20px;margin-bottom:16px;min-height:60px;
+  }
+  .chain-word{
+    font-family:'IBM Plex Mono',monospace;font-size:13px;padding:7px 14px;
+    border-radius:20px;background:var(--panel-raised);border:1px solid var(--line);color:#F5F1E8;
+  }
+  .chain-word.you{border-color:rgba(224,172,63,0.35);color:var(--brass-soft);}
+  .chain-word.claude{border-color:rgba(111,224,160,0.35);color:var(--signal);}
+  .chain-arrow{color:var(--slate-dim);font-size:14px;}
+
+  .riddle-feedback.answered{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:14px;padding:10px 16px;border-radius:6px;
+  }
+  .riddle-feedback.correct.answered{
+    background:rgba(111,224,160,0.1);border:1px solid rgba(111,224,160,0.35);color:var(--signal);
+  }
+  .riddle-feedback.revealed.answered{
+    background:rgba(224,172,63,0.1);border:1px solid rgba(224,172,63,0.35);color:var(--brass-soft);
+  }
+  .timer-btn:disabled{opacity:0.4;cursor:default;}
+  .timer-btn:disabled:hover{border-color:var(--line);color:var(--slate);}
+
+  /* ---- Responsive ---- */
+  @media (max-width: 640px){
+    nav{padding:14px 22px;}
+    .nav-links{gap:16px;}
+    .nav-search-wrap{display:none;}
+    .brand-name{font-size:17px;}
+    .hero{padding:70px 22px 80px 22px;}
+    .hero h1{font-size:40px;}
+    .cursor{height:30px;vertical-align:-4px;}
+    .widget-row{gap:10px;}
+    .widget{min-width:140px;padding:12px 16px;}
+    .widget-main{font-size:22px;}
+    main{padding:40px 22px;}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="brand-name" id="brandName">Shaurya's Workspace</div>
+  <div class="nav-search-wrap" id="globalSearchWrap">
+    <input type="text" id="globalSearch" class="nav-search-input" placeholder="Search pages, formulas, vocab..." oninput="handleGlobalSearch()" onkeydown="if(event.key==='Escape') closeGlobalSearch();">
+    <div class="nav-search-results" id="globalSearchResults"></div>
+  </div>
+  <div class="nav-links">
+    <div class="nav-link active" id="navToggle" onclick="switchView('home')">Home</div>
+  </div>
+</nav>
+
+<div class="view visible active" id="view-welcome">
+  <div class="hero">
+    <div class="hero-inner">
+      <div class="hero-eyebrow"><span class="rule"></span>Personal workspace</div>
+      <h1 id="title-welcome"><span class="title-text"></span><span class="cursor"></span></h1>
+      <div class="sub">This is your space — built for whatever you decide to put here next.</div>
+      <div class="status-line"><span class="status-dot"></span>System Ready</div>
+
+      <div class="widget-row">
+        <div class="widget" id="clockWidget">
+          <div class="widget-label">Local time</div>
+          <div class="widget-main" id="clockTime">--:--</div>
+          <div class="widget-sub" id="clockDate">Loading...</div>
+        </div>
+        <div class="widget" id="weatherWidget">
+          <div class="widget-label">Weather</div>
+          <div class="widget-main" id="weatherTemp">--°</div>
+          <div class="widget-sub" id="weatherDesc">Loading...</div>
+        </div>
+      </div>
+
+      <div class="fact-card">
+        <div class="fact-label">Did you know</div>
+        <div class="fact-text-wrap">
+          <div class="fact-text" id="factA"></div>
+          <div class="fact-text" id="factB"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="view" id="view-home">
+  <main>
+    <div class="view-head">
+      <h2 id="title-home"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Jump into a section — this fills up as we build more of the site.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('chat')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 10h8M8 14h5"/></svg></div>
+        <div class="hub-card-title">Claude</div>
+        <div class="hub-card-desc">A clear, simplified assistant — helps with anything, especially good for working through schoolwork.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('study')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M2 9l10-5 10 5-10 5-10-5z"/><path d="M6 12v4c0 1.1 2.7 2 6 2s6-.9 6-2v-4"/></svg></div>
+        <div class="hub-card-title">Study Hub</div>
+        <div class="hub-card-desc">Assignments, deadlines, notes, and everything else school-related, in one place.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('entertainment')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="20" height="9" rx="4"/><path d="M7 11v3M5.5 12.5h3"/><circle cx="16" cy="11" r="1" fill="currentColor" stroke="none"/><circle cx="18.5" cy="14" r="1" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Entertainment Hub</div>
+        <div class="hub-card-desc">Playlists, games, and anything else that's just for fun.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-chat">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Claude</h2>
+        <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
+      </div>
+      <button class="clear-btn" onclick="clearChat()">Clear chat</button>
+    </div>
+    <div id="chatlog"></div>
+    <div class="chat-input-row">
+      <textarea id="chatInput" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+      <button id="sendBtn" onclick="sendChat()">Send</button>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-timer">
+  <main class="timer-main">
+    <div class="view-head">
+      <h2>Focus Timer</h2>
+      <div class="view-sub">20 minutes focused, then a 5 minute break. Repeats until you stop it.</div>
+    </div>
+
+    <div class="timer-ring-wrap">
+      <svg class="timer-ring" viewBox="0 0 300 300">
+        <circle class="ring-track" cx="150" cy="150" r="130"></circle>
+        <circle class="ring-progress" id="ringProgress" cx="150" cy="150" r="130"></circle>
+      </svg>
+      <div class="timer-center">
+        <div class="timer-phase" id="timerPhase">Focus</div>
+        <div class="timer-display" id="timerDisplay">20:00</div>
+      </div>
+    </div>
+
+    <div class="timer-controls">
+      <button class="timer-btn primary" id="timerStartBtn" onclick="toggleTimer()">Start</button>
+      <button class="timer-btn" onclick="skipPhase()">Skip</button>
+      <button class="timer-btn" onclick="resetTimer()">Reset</button>
+    </div>
+    <div class="timer-sessions">Focus sessions completed: <span id="sessionCount">0</span></div>
+  </main>
+</div>
+
+<div class="view" id="view-study">
+  <main>
+    <div class="view-head">
+      <h2 id="title-study"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Everything school-related, in one place — click into any section below.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('timer')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+        <div class="hub-card-title">Focus Timer</div>
+        <div class="hub-card-desc">20 minutes focused, 5 minutes off — back to back, for as long as you need.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('calc')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><circle cx="8" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="8" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="15" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Quick Calculator</div>
+        <div class="hub-card-desc">A calculator and a unit converter, in one place.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('formulas')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M17 4H7l5 8-5 8h10"/></svg></div>
+        <div class="hub-card-title">Formula Sheet</div>
+        <div class="hub-card-desc">Maths, physics, and chemistry formulas — built in, nothing to maintain.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('vocab')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 5c2-1 5-1 8 0v14c-3-1-6-1-8 0V5z"/><path d="M20 5c-2-1-5-1-8 0v14c3-1 6-1 8 0V5z"/></svg></div>
+        <div class="hub-card-title">Vocabulary Builder</div>
+        <div class="hub-card-desc">Claude generates words with definitions and examples — saved permanently.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('ambient')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 4v16l-6-4v-8l6-4z"/><path d="M15 8a4 4 0 0 1 0 8"/><path d="M18 5a8 8 0 0 1 0 14"/></svg></div>
+        <div class="hub-card-title">Ambient Sounds</div>
+        <div class="hub-card-desc">Rain, white noise, and other background sound to study to. Layer as many as you like.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-ambient">
+  <main>
+    <div class="view-head">
+      <h2>Ambient Sounds</h2>
+      <div class="view-sub">Generated in the browser, not streamed — layer as many as you like, each with its own volume.</div>
+    </div>
+    <div class="sound-grid" id="soundGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-calc">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Quick Calculator</h2>
+        <div class="view-sub">Basic maths, or convert between units.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn active" id="calcModeCalc" onclick="setCalcMode('calc')">Calculator</button>
+        <button class="clear-btn" id="calcModeConvert" onclick="setCalcMode('convert')">Converter</button>
+      </div>
+    </div>
+
+    <div id="calcPanel">
+      <div class="calc-display" id="calcDisplay">0</div>
+      <div class="calc-grid">
+        <button class="calc-btn wide" onclick="calcClear()">C</button>
+        <button class="calc-btn" onclick="calcBackspace()">⌫</button>
+        <button class="calc-btn op" onclick="calcInput('/')">÷</button>
+        <button class="calc-btn" onclick="calcInput('7')">7</button>
+        <button class="calc-btn" onclick="calcInput('8')">8</button>
+        <button class="calc-btn" onclick="calcInput('9')">9</button>
+        <button class="calc-btn op" onclick="calcInput('*')">×</button>
+        <button class="calc-btn" onclick="calcInput('4')">4</button>
+        <button class="calc-btn" onclick="calcInput('5')">5</button>
+        <button class="calc-btn" onclick="calcInput('6')">6</button>
+        <button class="calc-btn op" onclick="calcInput('-')">−</button>
+        <button class="calc-btn" onclick="calcInput('1')">1</button>
+        <button class="calc-btn" onclick="calcInput('2')">2</button>
+        <button class="calc-btn" onclick="calcInput('3')">3</button>
+        <button class="calc-btn op" onclick="calcInput('+')">+</button>
+        <button class="calc-btn" onclick="calcInput('0')">0</button>
+        <button class="calc-btn" onclick="calcInput('.')">.</button>
+        <button class="calc-btn" onclick="calcInput('(')">(</button>
+        <button class="calc-btn" onclick="calcInput(')')">)</button>
+        <button class="calc-btn equals wide" onclick="calcEquals()">=</button>
+      </div>
+    </div>
+
+    <div id="convertPanel" style="display:none;">
+      <div class="convert-row">
+        <select id="convertCategory" onchange="onConvertCategoryChange()"></select>
+      </div>
+      <div class="convert-row">
+        <input type="number" id="convertInput" placeholder="Value" oninput="runConvert()">
+        <select id="convertFrom" onchange="runConvert()"></select>
+      </div>
+      <div class="convert-arrow">↓</div>
+      <div class="convert-row">
+        <div class="convert-result" id="convertResult">0</div>
+        <select id="convertTo" onchange="runConvert()"></select>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-formulas">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Formula Sheet</h2>
+        <div class="view-sub">A built-in reference — nothing to keep updated.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn active" id="formulaTabMaths" onclick="setFormulaTab('maths')">Maths</button>
+        <button class="clear-btn" id="formulaTabPhysics" onclick="setFormulaTab('physics')">Physics</button>
+        <button class="clear-btn" id="formulaTabChemistry" onclick="setFormulaTab('chemistry')">Chemistry</button>
+        <button class="clear-btn" id="formulaTabBiology" onclick="setFormulaTab('biology')">Biology</button>
+      </div>
+    </div>
+    <div class="quick-add">
+      <input id="formulaSearch" placeholder="Search all formulas..." oninput="renderFormulas()">
+    </div>
+    <div class="formula-grid" id="formulaGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-vocab">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Vocabulary Builder</h2>
+        <div class="view-sub">Claude generates the words — everything you keep is saved here permanently.</div>
+      </div>
+      <div class="game-score" id="vocabCount">Words saved: <span id="vocabCountNum">0</span></div>
+      <button class="clear-btn" id="vocabClearBtn" onclick="clearVocab()">Clear All</button>
+    </div>
+    <div class="quick-add">
+      <input id="vocabTopic" placeholder="Topic (e.g. essay writing, biology, general advanced vocab)">
+      <button onclick="generateVocab()" id="vocabGenBtn">Generate 5 Words</button>
+    </div>
+    <div class="riddle-feedback" id="vocabFeedback"></div>
+    <div class="formula-grid" id="vocabGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-entertainment">
+  <main>
+    <div class="view-head">
+      <h2 id="title-entertainment"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Playlists, games, and anything else that's just for fun — this fills up as we build more of it.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('riddles')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3 11c1 .6 1 1.5 1 2h4c0-.5 0-1.4 1-2a6 6 0 0 0-3-11z"/></svg></div>
+        <div class="hub-card-title">Riddles &amp; Jokes</div>
+        <div class="hub-card-desc">Fresh ones generated by Claude — solve a riddle or get a laugh.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('games')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="3"/><line x1="12" y1="9" x2="12" y2="16"/><rect x="6" y="16" width="12" height="4" rx="1"/></svg></div>
+        <div class="hub-card-title">Game Hub</div>
+        <div class="hub-card-desc">Snake, 2048, a sliding puzzle, and a reaction test.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('excuse')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3 2.4c-.7.3-1 .8-1 1.6"/><circle cx="11.5" cy="16.3" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Excuse Generator</div>
+        <div class="hub-card-desc">Claude generates an excuse — dial it up if it's not absurd enough.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('whichx')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 3v3a2 2 0 1 1 0 4v3H3v-3a2 2 0 1 0 0-4V3h6z"/><path d="M9 3h6v3a2 2 0 1 1 0 4v3H9"/></svg></div>
+        <div class="hub-card-title">Which X Are You?</div>
+        <div class="hub-card-desc">Name any topic, take a quiz, get a Claude-judged result.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('wheel')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="3" x2="12" y2="21"/><line x1="3" y1="12" x2="21" y2="12"/></svg></div>
+        <div class="hub-card-title">Decision Wheel</div>
+        <div class="hub-card-desc">Type your options, spin, let it decide for you.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-riddles">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Riddles &amp; Jokes</h2>
+        <div class="view-sub">Generated fresh by Claude every time — pick one from the corner.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn" onclick="generateContent('joke')">New Joke</button>
+        <button class="clear-btn" onclick="generateContent('riddle')">New Riddle</button>
+      </div>
+    </div>
+
+    <div class="riddle-card">
+      <div class="riddle-label" id="riddleLabel">&nbsp;</div>
+      <div class="riddle-text" id="riddleText">Pick "New Joke" or "New Riddle" above to get started.</div>
+
+      <div class="riddle-answer-row" id="riddleAnswerRow" style="display:none;">
+        <input type="text" id="riddleAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" id="riddleSubmitBtn" onclick="checkRiddleAnswer()">Submit</button>
+        <button class="timer-btn" onclick="revealRiddleAnswer()">Reveal</button>
+      </div>
+      <div class="riddle-feedback" id="riddleFeedback"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-games">
+  <main>
+    <div class="view-head">
+      <h2 id="title-games"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">A few quick games — click into any of them.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('snake')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 6h6a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h8"/></svg></div>
+        <div class="hub-card-title">Snake</div>
+        <div class="hub-card-desc">Classic grid movement, growing tail, don't hit the walls.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('game2048')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg></div>
+        <div class="hub-card-title">2048</div>
+        <div class="hub-card-desc">Slide and merge tiles to reach 2048.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('puzzle15')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></div>
+        <div class="hub-card-title">15 Puzzle</div>
+        <div class="hub-card-desc">Slide the tiles back into order.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('reaction')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div>
+        <div class="hub-card-title">Reaction Test</div>
+        <div class="hub-card-desc">Click the instant it turns green. Tracks your best.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('tictactoe')"><div class="hub-icon"><svg viewBox="0 0 24 24"><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg></div>
+        <div class="hub-card-title">Tic-Tac-Toe</div>
+        <div class="hub-card-desc">Play against an AI opponent that plays optimally.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('wordchain')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="9" height="8" rx="4"/><rect x="13" y="8" width="9" height="8" rx="4"/></svg></div>
+        <div class="hub-card-title">Word Chain</div>
+        <div class="hub-card-desc">Take turns with Claude building a chain of associated words.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-snake">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Snake</h2>
+        <div class="view-sub">Arrow keys or WASD to move.</div>
+      </div>
+      <div class="game-score">Score: <span id="snakeScore">0</span></div>
+    </div>
+    <div class="game-stage">
+      <canvas id="snakeCanvas" width="360" height="360"></canvas>
+      <div class="game-overlay" id="snakeOverlay">
+        <div class="game-overlay-text">Press any arrow key to start</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-game2048">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>2048</h2>
+        <div class="view-sub">Arrow keys to slide. Matching tiles merge.</div>
+      </div>
+      <div class="game-score">Score: <span id="score2048">0</span></div>
+    </div>
+    <div class="game-stage">
+      <div class="grid-2048" id="grid2048"></div>
+      <div class="game-overlay" id="overlay2048" style="display:none;">
+        <div class="game-overlay-text" id="overlayText2048"></div>
+        <button class="timer-btn primary" onclick="init2048()">Try Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-puzzle15">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>15 Puzzle</h2>
+        <div class="view-sub">Click a tile next to the empty space to slide it.</div>
+      </div>
+      <div class="game-score">Moves: <span id="movesPuzzle">0</span></div>
+    </div>
+    <div class="game-stage">
+      <div class="grid-puzzle15" id="gridPuzzle15"></div>
+      <div class="game-overlay" id="overlayPuzzle15" style="display:none;">
+        <div class="game-overlay-text">Solved! 🎉</div>
+        <button class="timer-btn primary" onclick="initPuzzle15()">Shuffle Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-reaction">
+  <main>
+    <div class="view-head">
+      <h2>Reaction Test</h2>
+      <div class="view-sub">Click the box the instant it turns green.</div>
+    </div>
+    <div class="reaction-stats">
+      <div class="clicker-stat"><div class="cs-label">Last</div><div class="cs-value" id="reactionLast">--</div></div>
+      <div class="clicker-stat"><div class="cs-label">Best</div><div class="cs-value" id="reactionBest">--</div></div>
+    </div>
+    <div class="reaction-box" id="reactionBox" onclick="handleReactionClick()">
+      <div id="reactionText">Click to start</div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-tictactoe">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Tic-Tac-Toe</h2>
+        <div class="view-sub" id="tttSub">You're X. The AI plays optimally — a draw is a good result.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn" id="tttModeUnbeatable" onclick="setTttMode('unbeatable')">Unbeatable</button>
+        <button class="clear-btn" id="tttModeBeatable" onclick="setTttMode('beatable')">Beatable</button>
+      </div>
+    </div>
+    <div class="game-score" style="display:inline-block;margin-bottom:16px;">W: <span id="tttWinsNum">0</span> · L: <span id="tttLossesNum">0</span> · D: <span id="tttDrawsNum">0</span></div>
+    <div class="game-stage">
+      <div class="grid-ttt" id="gridTtt"></div>
+      <div class="game-overlay" id="overlayTtt" style="display:none;">
+        <div class="game-overlay-text" id="overlayTextTtt"></div>
+        <button class="timer-btn primary" onclick="initTtt()">Play Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-wordchain">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Word Chain</h2>
+        <div class="view-sub">You give a word, Claude gives one associated with it, back and forth.</div>
+      </div>
+      <div class="game-score" id="chainCount">Chain length: <span id="chainCountNum">0</span></div>
+      <button class="clear-btn" onclick="resetWordChain()">New Chain</button>
+    </div>
+    <div class="chain-display" id="chainDisplay">
+      <div class="placeholder-note">Type a word below to start the chain.</div>
+    </div>
+    <div class="quick-add">
+      <input id="wordChainInput" placeholder="Your word..." onkeydown="if(event.key==='Enter'){event.preventDefault();submitWordChain();}">
+      <button onclick="submitWordChain()" id="wordChainBtn">Add</button>
+    </div>
+    <div class="riddle-feedback" id="wordChainFeedback"></div>
+  </main>
+</div>
+
+<div class="view" id="view-excuse">
+  <main>
+    <div class="view-head">
+      <h2>Excuse Generator</h2>
+      <div class="view-sub">Tell it what you need an excuse for. Claude will happily oblige.</div>
+    </div>
+    <div class="quick-add">
+      <input id="excuseInput" placeholder="What do you need an excuse for? (e.g. being late)">
+      <button onclick="generateExcuse()">Generate</button>
+    </div>
+    <div class="riddle-card">
+      <div class="riddle-label" id="excuseLabel">&nbsp;</div>
+      <div class="riddle-text" id="excuseText">Type something above and hit Generate.</div>
+      <div class="riddle-feedback" id="excuseLevelDisplay" style="display:none;">Absurdity level: <span id="excuseLevelNum">1</span></div>
+      <button class="timer-btn primary" id="excuseMoreBtn" onclick="escalateExcuse()" style="display:none;">Make It More Absurd</button>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-whichx">
+  <main>
+    <div class="view-head">
+      <h2>Which X Are You?</h2>
+      <div class="view-sub">Name any topic — Claude builds a quiz and judges your result.</div>
+    </div>
+
+    <div id="whichxSetup">
+      <div class="quick-add">
+        <input id="whichxTopic" placeholder="e.g. Roblox game, programming language, mythical creature...">
+        <button onclick="startWhichX()" id="whichxStartBtn">Build Quiz</button>
+      </div>
+    </div>
+
+    <div id="whichxQuizArea" style="display:none;">
+      <div class="riddle-card" id="whichxQuestionCard"></div>
+    </div>
+
+    <div id="whichxResultArea" style="display:none;">
+      <div class="riddle-card">
+        <div class="riddle-label">Your Result</div>
+        <div class="riddle-text" id="whichxResultTitle" style="font-family:'Bebas Neue',sans-serif;font-size:28px;"></div>
+        <div class="riddle-text" id="whichxResultDesc"></div>
+        <button class="timer-btn primary" onclick="resetWhichX()">Try Another Topic</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-wheel">
+  <main>
+    <div class="view-head">
+      <h2>Decision Wheel</h2>
+      <div class="view-sub">Add your options, spin, and let it decide.</div>
+    </div>
+
+    <div class="quick-add">
+      <input id="wheelOptionInput" placeholder="Add an option..." onkeydown="if(event.key==='Enter'){event.preventDefault();addWheelOption();}">
+      <button onclick="addWheelOption()">Add</button>
+    </div>
+    <ul class="task-list" id="wheelOptionList"></ul>
+
+    <div class="wheel-stage">
+      <div class="wheel-pointer"></div>
+      <div class="wheel-wrap" id="wheelWrap">
+        <div class="wheel" id="wheel"></div>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <button class="timer-btn primary" onclick="spinWheel()" id="spinBtn">Spin</button>
+    </div>
+    <div class="riddle-feedback" id="wheelResult" style="text-align:center;margin-top:14px;"></div>
+  </main>
+</div>
+
+<script>
+  /* ---- View switching ---- */
+  const BRAND_LABELS = {
+    welcome: "Shaurya's Workspace", home: "Home", chat: "Claude", timer: "Focus Timer",
+    study: "Study Hub", entertainment: "Entertainment Hub", riddles: "Riddles & Jokes",
+    games: "Game Hub", snake: "Snake", game2048: "2048", puzzle15: "15 Puzzle", reaction: "Reaction Test",
+    tictactoe: "Tic-Tac-Toe", wordchain: "Word Chain",
+    excuse: "Excuse Generator", whichx: "Which X Are You?", wheel: "Decision Wheel",
+    calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds"
+  };
+  const NAV_TOGGLE = {
+    welcome: { label: 'Home', target: 'home' },
+    home: { label: 'Welcome Hub', target: 'welcome' },
+    chat: { label: 'Home', target: 'home' },
+    timer: { label: 'Study Hub', target: 'study' },
+    study: { label: 'Home', target: 'home' },
+    entertainment: { label: 'Home', target: 'home' },
+    riddles: { label: 'Entertainment Hub', target: 'entertainment' },
+    games: { label: 'Entertainment Hub', target: 'entertainment' },
+    snake: { label: 'Game Hub', target: 'games' },
+    game2048: { label: 'Game Hub', target: 'games' },
+    puzzle15: { label: 'Game Hub', target: 'games' },
+    reaction: { label: 'Game Hub', target: 'games' },
+    tictactoe: { label: 'Game Hub', target: 'games' },
+    wordchain: { label: 'Game Hub', target: 'games' },
+    excuse: { label: 'Entertainment Hub', target: 'entertainment' },
+    whichx: { label: 'Entertainment Hub', target: 'entertainment' },
+    wheel: { label: 'Entertainment Hub', target: 'entertainment' },
+    calc: { label: 'Study Hub', target: 'study' },
+    formulas: { label: 'Study Hub', target: 'study' },
+    vocab: { label: 'Study Hub', target: 'study' },
+    ambient: { label: 'Study Hub', target: 'study' }
+  };
+
+  /* ---- Shared count-up animation ---- */
+  function animateNumber(el, newValue, opts){
+    opts = opts || {};
+    const suffix = opts.suffix || '';
+    const duration = opts.duration || 600;
+    const oldValue = parseFloat(el.dataset.countVal || '0') || 0;
+    el.dataset.countVal = newValue;
+
+    if(oldValue === newValue){
+      el.textContent = newValue + suffix;
+      return;
+    }
+
+    // Visible bump so even a +1 change (which has no in-between integer to roll through) is noticeable
+    el.classList.remove('count-pop');
+    void el.offsetWidth; // restart the animation if it's already mid-pop
+    el.classList.add('count-pop');
+
+    let start = null; // set from the first rAF timestamp itself, never from a separately-captured clock
+    function step(now){
+      if(start === null) start = now;
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+      const current = Math.round(oldValue + (newValue - oldValue) * eased);
+      el.textContent = current + suffix;
+      if(progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  const SCROLL_ACCENTS = {
+    study: 'var(--accent-orange)', timer: 'var(--accent-orange)', calc: 'var(--accent-orange)',
+    formulas: 'var(--accent-orange)', vocab: 'var(--accent-orange)', ambient: 'var(--accent-orange)',
+    entertainment: 'var(--accent-violet)', riddles: 'var(--accent-violet)', excuse: 'var(--accent-violet)',
+    whichx: 'var(--accent-violet)', wheel: 'var(--accent-violet)',
+    games: 'var(--accent-teal)', snake: 'var(--accent-teal)', game2048: 'var(--accent-teal)',
+    puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)'
+  };
+
+  function switchView(view){
+    const current = document.querySelector('.view.visible');
+    const target = document.getElementById('view-' + view);
+    if(!target || current === target) return;
+
+    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Workspace";
+    const nav = NAV_TOGGLE[view];
+    if(nav){
+      const navEl = document.getElementById('navToggle');
+      navEl.textContent = nav.label;
+      navEl.onclick = () => switchView(nav.target);
+    }
+
+    document.documentElement.style.setProperty('--scroll-accent', SCROLL_ACCENTS[view] || 'var(--brass-dim)');
+
+    if(current){
+      current.classList.remove('active'); // fades/slides the old page out
+      setTimeout(() => current.classList.remove('visible'), 380);
+    }
+
+    setTimeout(() => {
+      target.classList.add('visible');
+      void target.offsetWidth; // force reflow so the transition actually plays
+      target.classList.add('active');
+      typeTitle(view);
+    }, current ? 190 : 0);
+  }
+
+  /* ---- Global search ---- */
+  const PAGE_INDEX = [
+    { label: 'Home', view: 'home' },
+    { label: 'Claude', view: 'chat' },
+    { label: 'Study Hub', view: 'study' },
+    { label: 'Focus Timer', view: 'timer' },
+    { label: 'Quick Calculator', view: 'calc' },
+    { label: 'Formula Sheet', view: 'formulas' },
+    { label: 'Vocabulary Builder', view: 'vocab' },
+    { label: 'Entertainment Hub', view: 'entertainment' },
+    { label: 'Riddles & Jokes', view: 'riddles' },
+    { label: 'Game Hub', view: 'games' },
+    { label: 'Snake', view: 'snake' },
+    { label: '2048', view: 'game2048' },
+    { label: '15 Puzzle', view: 'puzzle15' },
+    { label: 'Reaction Test', view: 'reaction' },
+    { label: 'Tic-Tac-Toe', view: 'tictactoe' },
+    { label: 'Word Chain', view: 'wordchain' },
+    { label: 'Excuse Generator', view: 'excuse' },
+    { label: 'Which X Are You?', view: 'whichx' },
+    { label: 'Decision Wheel', view: 'wheel' }
+  ];
+
+  let searchResultActions = [];
+
+  function handleGlobalSearch(){
+    const query = document.getElementById('globalSearch').value.trim().toLowerCase();
+    const resultsEl = document.getElementById('globalSearchResults');
+
+    if(!query){
+      resultsEl.style.display = 'none';
+      resultsEl.innerHTML = '';
+      return;
+    }
+
+    let results = [];
+
+    PAGE_INDEX.forEach(p => {
+      if(p.label.toLowerCase().includes(query)){
+        results.push({ type: 'Page', label: p.label, action: () => switchView(p.view) });
+      }
+    });
+
+    if(typeof FORMULAS !== 'undefined'){
+      Object.entries(FORMULAS).forEach(([subject, list]) => {
+        list.forEach(f => {
+          if(f.name.toLowerCase().includes(query) || f.expr.toLowerCase().includes(query)){
+            results.push({
+              type: 'Formula', label: f.name, sub: f.expr,
+              action: () => {
+                switchView('formulas');
+                setTimeout(() => {
+                  const searchBox = document.getElementById('formulaSearch');
+                  if(searchBox){ searchBox.value = f.name; renderFormulas(); }
+                }, 250);
+              }
+            });
+          }
+        });
+      });
+    }
+
+    if(typeof vocabList !== 'undefined'){
+      vocabList.forEach(v => {
+        if(v.word.toLowerCase().includes(query) || v.definition.toLowerCase().includes(query)){
+          results.push({ type: 'Vocab', label: v.word, sub: v.definition, action: () => switchView('vocab') });
+        }
+      });
+    }
+
+    results = results.slice(0, 8);
+    searchResultActions = results;
+
+    if(results.length === 0){
+      resultsEl.innerHTML = '<div class="search-result-empty">No matches found.</div>';
+    }else{
+      resultsEl.innerHTML = results.map((r, i) => `
+        <div class="search-result-item" data-idx="${i}">
+          <span class="search-result-type">${r.type}</span>
+          <span class="search-result-label">${escapeHtml(r.label)}</span>
+          ${r.sub ? `<span class="search-result-sub">${escapeHtml(r.sub)}</span>` : ''}
+        </div>
+      `).join('');
+      resultsEl.querySelectorAll('.search-result-item').forEach(el => {
+        el.addEventListener('click', () => {
+          const idx = parseInt(el.dataset.idx);
+          searchResultActions[idx].action();
+          closeGlobalSearch();
+        });
+      });
+    }
+    resultsEl.style.display = 'block';
+  }
+
+  function closeGlobalSearch(){
+    document.getElementById('globalSearch').value = '';
+    document.getElementById('globalSearchResults').style.display = 'none';
+    document.getElementById('globalSearchResults').innerHTML = '';
+  }
+
+  document.addEventListener('click', e => {
+    const wrap = document.getElementById('globalSearchWrap');
+    if(wrap && !wrap.contains(e.target)) closeGlobalSearch();
+  });
+
+
+  /* ---- Title typing effect ---- */
+  const TITLE_TEXTS = {
+    welcome: 'Welcome back, Shaurya Kshitij',
+    home: 'What will you do today?',
+    chat: 'Claude',
+    timer: 'Focus Timer',
+    study: 'Study Hub',
+    calc: 'Quick Calculator',
+    formulas: 'Formula Sheet',
+    vocab: 'Vocabulary Builder',
+    entertainment: 'Entertainment Hub',
+    riddles: 'Riddles & Jokes',
+    games: 'Game Hub',
+    snake: 'Snake',
+    game2048: '2048',
+    puzzle15: '15 Puzzle',
+    reaction: 'Reaction Test',
+    tictactoe: 'Tic-Tac-Toe',
+    wordchain: 'Word Chain',
+    excuse: 'Excuse Generator',
+    whichx: 'Which X Are You?',
+    wheel: 'Decision Wheel'
+  };
+
+  function typeTitle(view){
+    const container = document.getElementById('title-' + view);
+    const text = TITLE_TEXTS[view];
+    if(!container || !text) return;
+    const span = container.querySelector('.title-text');
+    if(!span) return;
+
+    clearInterval(span._typeInterval);
+    span.textContent = '';
+    let i = 0;
+    span._typeInterval = setInterval(() => {
+      span.textContent += text[i];
+      i++;
+      if(i >= text.length) clearInterval(span._typeInterval);
+    }, 35);
+  }
+
+  /* ---- Claude chat ---- */
+  const CHAT_SYSTEM_PROMPT = `You are a helpful, general-purpose assistant for Shaurya, a student at Wallington County Grammar School. Follow these rules:
+
+1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless Shaurya specifically wants technical depth.
+2. Give simplified explanations by default. Break things down into their basic idea first.
+3. Do not just hand over the direct answer to a question straight away. Guide Shaurya toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless he explicitly asks you to just give him the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
+4. You are a general assistant, not exclusively a study tool — help with anything Shaurya brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
+5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
+
+  let chatHistory = [];
+
+  function clearChat(){
+    chatHistory = [];
+    renderChat();
+  }
+
+  /* ---- Focus Timer ---- */
+  const FOCUS_LENGTH = 20 * 60;
+  const BREAK_LENGTH = 5 * 60;
+  const RING_CIRCUMFERENCE = 2 * Math.PI * 130;
+
+  let timerPhase = 'focus';
+  let timerRemaining = FOCUS_LENGTH;
+  let timerInterval = null;
+  let sessionsCompleted = 0;
+
+  function formatTime(s){
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+  }
+
+  function updateTimerDisplay(){
+    document.getElementById('timerDisplay').textContent = formatTime(timerRemaining);
+    const phaseEl = document.getElementById('timerPhase');
+    const isBreak = timerPhase === 'break';
+    phaseEl.textContent = isBreak ? 'Break' : 'Focus';
+    phaseEl.classList.toggle('break', isBreak);
+    animateNumber(document.getElementById('sessionCount'), sessionsCompleted);
+
+    const total = isBreak ? BREAK_LENGTH : FOCUS_LENGTH;
+    const frac = timerRemaining / total;
+    const ring = document.getElementById('ringProgress');
+    ring.style.strokeDasharray = RING_CIRCUMFERENCE;
+    ring.style.strokeDashoffset = RING_CIRCUMFERENCE * (1 - frac);
+    ring.classList.toggle('break', isBreak);
+  }
+
+  function timerTick(){
+    timerRemaining--;
+    if(timerRemaining <= 0){
+      if(timerPhase === 'focus'){
+        sessionsCompleted++;
+        timerPhase = 'break';
+        timerRemaining = BREAK_LENGTH;
+      }else{
+        timerPhase = 'focus';
+        timerRemaining = FOCUS_LENGTH;
+      }
+    }
+    updateTimerDisplay();
+  }
+
+  function startTimer(){
+    if(timerInterval) return;
+    timerInterval = setInterval(timerTick, 1000);
+    document.getElementById('timerStartBtn').textContent = 'Pause';
+  }
+
+  function pauseTimer(){
+    clearInterval(timerInterval);
+    timerInterval = null;
+    document.getElementById('timerStartBtn').textContent = 'Start';
+  }
+
+  function toggleTimer(){
+    if(timerInterval) pauseTimer(); else startTimer();
+  }
+
+  function resetTimer(){
+    pauseTimer();
+    timerPhase = 'focus';
+    timerRemaining = FOCUS_LENGTH;
+    updateTimerDisplay();
+  }
+
+  function skipPhase(){
+    pauseTimer();
+    if(timerPhase === 'focus'){
+      sessionsCompleted++;
+      timerPhase = 'break';
+      timerRemaining = BREAK_LENGTH;
+    }else{
+      timerPhase = 'focus';
+      timerRemaining = FOCUS_LENGTH;
+    }
+    updateTimerDisplay();
+  }
+
+  updateTimerDisplay();
+
+  /* ---- Riddles & Jokes ---- */
+  let currentRiddleAnswer = null;
+  let shownJokes = [];
+  let shownRiddles = [];
+  const JOKE_TOPICS = ['animals', 'school', 'food', 'computers', 'sports', 'space', 'music', 'weather', 'everyday objects', 'wordplay/puns'];
+
+  function skeletonBars(count){
+    const widths = ['92%', '78%', '60%'];
+    let html = '';
+    for(let i = 0; i < count; i++){
+      const isLast = i === count - 1;
+      html += `<div class="skeleton" style="width:${widths[i % widths.length]};${isLast ? '' : 'margin-bottom:8px;'}"></div>`;
+    }
+    return html;
+  }
+
+  async function generateContent(type){
+    const label = document.getElementById('riddleLabel');
+    const textEl = document.getElementById('riddleText');
+    const answerRow = document.getElementById('riddleAnswerRow');
+    const feedback = document.getElementById('riddleFeedback');
+
+    feedback.textContent = '';
+    feedback.className = 'riddle-feedback';
+    label.textContent = type === 'riddle' ? 'Riddle' : 'Joke';
+    textEl.innerHTML = skeletonBars(2);
+    answerRow.style.display = 'none';
+    currentRiddleAnswer = null;
+    document.getElementById('riddleSubmitBtn').disabled = false;
+
+    const topic = JOKE_TOPICS[Math.floor(Math.random() * JOKE_TOPICS.length)];
+    const avoidList = (type === 'riddle' ? shownRiddles : shownJokes).slice(-10).join(' | ');
+    const avoidClause = avoidList ? ` Do not repeat or closely resemble any of these already-used ones: ${avoidList}.` : '';
+
+    const prompt = type === 'riddle'
+      ? `Give me one original, fun riddle suitable for a teenager, themed around ${topic}, with a clear short answer (one word or a short phrase).${avoidClause} Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"riddle": "<riddle text>", "answer": "<short answer>"}`
+      : `Tell me one short, clean, funny joke suitable for a teenager, themed around ${topic}, split into a setup and a punchline.${avoidClause} Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"setup": "<setup text>", "punchline": "<punchline text>"}`;
+
+    try{
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 300,
+          temperature: 1,
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
+      const data = await response.json();
+      const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      const match = textBlocks.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : textBlocks);
+
+      if(type === 'riddle'){
+        textEl.textContent = parsed.riddle;
+        currentRiddleAnswer = (parsed.answer || '').trim();
+        document.getElementById('riddleAnswerInput').value = '';
+        answerRow.style.display = 'flex';
+        shownRiddles.push(parsed.riddle);
+        if(shownRiddles.length > 15) shownRiddles.shift();
+      }else{
+        textEl.innerHTML = '';
+        const setupEl = document.createElement('span');
+        setupEl.textContent = parsed.setup;
+        const punchlineEl = document.createElement('span');
+        punchlineEl.className = 'punchline';
+        textEl.appendChild(setupEl);
+        textEl.appendChild(punchlineEl);
+        setTimeout(() => {
+          punchlineEl.textContent = parsed.punchline;
+          punchlineEl.classList.add('shown');
+        }, 5000);
+        shownJokes.push(parsed.setup + ' / ' + parsed.punchline);
+        if(shownJokes.length > 15) shownJokes.shift();
+      }
+    }catch(e){
+      textEl.textContent = "Couldn't come up with one — try again.";
+    }
+  }
+
+  function checkRiddleAnswer(){
+    if(!currentRiddleAnswer) return;
+    const guess = document.getElementById('riddleAnswerInput').value.trim().toLowerCase();
+    const feedback = document.getElementById('riddleFeedback');
+    if(!guess) return;
+    const correct = currentRiddleAnswer.toLowerCase();
+    if(guess === correct || correct.includes(guess) || guess.includes(correct)){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      document.getElementById('riddleSubmitBtn').disabled = true;
+    }else{
+      feedback.textContent = 'Not quite — try again, or reveal the answer.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  function revealRiddleAnswer(){
+    if(!currentRiddleAnswer) return;
+    const feedback = document.getElementById('riddleFeedback');
+    feedback.textContent = 'Answer: ' + currentRiddleAnswer;
+    feedback.className = 'riddle-feedback revealed answered';
+    document.getElementById('riddleSubmitBtn').disabled = true;
+  }
+
+  document.getElementById('riddleAnswerInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter') checkRiddleAnswer();
+  });
+
+  function escapeHtml(s){
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderChat(){
+    const log = document.getElementById('chatlog');
+    log.innerHTML = '';
+    chatHistory.forEach((m, i) => {
+      const div = document.createElement('div');
+      const isNewest = i === chatHistory.length - 1;
+      div.className = 'msg ' + m.role + (isNewest ? ' msg-in' : '');
+      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'Claude'}</div><div class="body">${escapeHtml(m.content)}</div>`;
+      log.appendChild(div);
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function sendChat(){
+    const input = document.getElementById('chatInput');
+    const text = input.value.trim();
+    if(!text) return;
+    input.value = '';
+    chatHistory.push({ role: 'user', content: text });
+    renderChat();
+
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true;
+    const log = document.getElementById('chatlog');
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'typing';
+    typingDiv.innerHTML = 'Claude is thinking<span class="typing-dots"><span></span><span></span><span></span></span>';
+    log.appendChild(typingDiv);
+    log.scrollTop = log.scrollHeight;
+
+    try{
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          system: CHAT_SYSTEM_PROMPT,
+          messages: chatHistory.map(m => ({ role: m.role, content: m.content }))
+        })
+      });
+      const data = await response.json();
+      const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text);
+      const reply = textBlocks.join('\n') || 'No response.';
+      chatHistory.push({ role: 'assistant', content: reply });
+    }catch(e){
+      chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
+    }
+    typingDiv.remove();
+    renderChat();
+    btn.disabled = false;
+  }
+
+  /* ---- Snake ---- */
+  const SNAKE_SIZE = 18;
+  const SNAKE_COLS = 20;
+  let snake, snakeDir, snakeNextDir, snakeFood, snakeScore, snakeRunning, snakeInterval;
+
+  function initSnake(){
+    snake = [{x:9,y:10},{x:8,y:10},{x:7,y:10}];
+    snakeDir = {x:1,y:0};
+    snakeNextDir = {x:1,y:0};
+    snakeScore = 0;
+    snakeRunning = false;
+    spawnSnakeFood();
+    document.getElementById('snakeScore').textContent = '0';
+    document.getElementById('snakeScore').dataset.countVal = '0';
+    document.getElementById('snakeOverlay').style.display = 'flex';
+    document.getElementById('snakeOverlay').innerHTML = '<div class="game-overlay-text">Press any arrow key to start</div>';
+    drawSnake();
+  }
+
+  function spawnSnakeFood(){
+    let pos;
+    do{
+      pos = { x: Math.floor(Math.random()*SNAKE_COLS), y: Math.floor(Math.random()*SNAKE_COLS) };
+    }while(snake.some(s => s.x === pos.x && s.y === pos.y));
+    snakeFood = pos;
+  }
+
+  function drawSnake(){
+    const canvas = document.getElementById('snakeCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#16234F';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#6FE0A0';
+    ctx.fillRect(snakeFood.x*SNAKE_SIZE, snakeFood.y*SNAKE_SIZE, SNAKE_SIZE-2, SNAKE_SIZE-2);
+    snake.forEach((seg, i) => {
+      ctx.fillStyle = i === 0 ? '#F0CE85' : '#E0AC3F';
+      ctx.fillRect(seg.x*SNAKE_SIZE, seg.y*SNAKE_SIZE, SNAKE_SIZE-2, SNAKE_SIZE-2);
+    });
+  }
+
+  function snakeTick(){
+    const view = document.getElementById('view-snake');
+    if(!view.classList.contains('visible') || !snakeRunning) return;
+    snakeDir = snakeNextDir;
+    const head = { x: snake[0].x + snakeDir.x, y: snake[0].y + snakeDir.y };
+
+    if(head.x < 0 || head.x >= SNAKE_COLS || head.y < 0 || head.y >= SNAKE_COLS || snake.some(s => s.x === head.x && s.y === head.y)){
+      snakeRunning = false;
+      clearInterval(snakeInterval);
+      document.getElementById('snakeOverlay').style.display = 'flex';
+      document.getElementById('snakeOverlay').innerHTML = `<div class="game-overlay-text">Game Over — Score: ${snakeScore}</div><button class="timer-btn primary" onclick="initSnake()">Play Again</button>`;
+      return;
+    }
+
+    snake.unshift(head);
+    if(head.x === snakeFood.x && head.y === snakeFood.y){
+      snakeScore++;
+      animateNumber(document.getElementById('snakeScore'), snakeScore, { duration: 300 });
+      spawnSnakeFood();
+    }else{
+      snake.pop();
+    }
+    drawSnake();
+  }
+
+  document.addEventListener('keydown', e => {
+    const view = document.getElementById('view-snake');
+    if(!view || !view.classList.contains('visible')) return;
+    const dirs = {
+      ArrowUp: {x:0,y:-1}, ArrowDown: {x:0,y:1}, ArrowLeft: {x:-1,y:0}, ArrowRight: {x:1,y:0},
+      w: {x:0,y:-1}, s: {x:0,y:1}, a: {x:-1,y:0}, d: {x:1,y:0}
+    };
+    const d = dirs[e.key];
+    if(!d) return;
+    e.preventDefault();
+    if(d.x === -snakeDir.x && d.y === -snakeDir.y) return; // no reversing into self
+    snakeNextDir = d;
+    if(!snakeRunning){
+      snakeRunning = true;
+      document.getElementById('snakeOverlay').style.display = 'none';
+      clearInterval(snakeInterval);
+      snakeInterval = setInterval(snakeTick, 120);
+    }
+  });
+
+  initSnake();
+
+  /* ---- 2048 ---- */
+  let board2048, score2048;
+
+  function init2048(){
+    board2048 = Array.from({length:4}, () => Array(4).fill(0));
+    score2048 = 0;
+    document.getElementById('overlay2048').style.display = 'none';
+    document.getElementById('score2048').textContent = '0';
+    document.getElementById('score2048').dataset.countVal = '0';
+    spawn2048();
+    spawn2048();
+    render2048();
+  }
+
+  function spawn2048(){
+    const empty = [];
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++) if(board2048[r][c] === 0) empty.push([r,c]);
+    if(empty.length === 0) return;
+    const [r,c] = empty[Math.floor(Math.random()*empty.length)];
+    board2048[r][c] = Math.random() < 0.9 ? 2 : 4;
+  }
+
+  function render2048(){
+    const grid = document.getElementById('grid2048');
+    grid.innerHTML = '';
+    for(let r=0;r<4;r++){
+      for(let c=0;c<4;c++){
+        const v = board2048[r][c];
+        const tile = document.createElement('div');
+        tile.className = 'tile-2048';
+        if(v){ tile.setAttribute('data-v', v); tile.textContent = v; }
+        grid.appendChild(tile);
+      }
+    }
+    animateNumber(document.getElementById('score2048'), score2048, { duration: 300 });
+  }
+
+  function slideRow2048(row){
+    let vals = row.filter(v => v !== 0);
+    for(let i=0;i<vals.length-1;i++){
+      if(vals[i] === vals[i+1]){
+        vals[i] *= 2;
+        score2048 += vals[i];
+        vals.splice(i+1,1);
+      }
+    }
+    while(vals.length < 4) vals.push(0);
+    return vals;
+  }
+
+  function move2048(dir){
+    const before = JSON.stringify(board2048);
+    let b = board2048;
+    const rotate = g => g[0].map((_, c) => g.map(row => row[c]).reverse());
+
+    if(dir === 'left'){
+      b = b.map(row => slideRow2048(row));
+    }else if(dir === 'right'){
+      b = b.map(row => slideRow2048(row.slice().reverse()).reverse());
+    }else if(dir === 'up'){
+      let rot = rotate(rotate(rotate(b)));
+      rot = rot.map(row => slideRow2048(row));
+      b = rotate(rot);
+    }else if(dir === 'down'){
+      let rot = rotate(b);
+      rot = rot.map(row => slideRow2048(row));
+      b = rotate(rotate(rotate(rot)));
+    }
+
+    board2048 = b;
+    if(JSON.stringify(board2048) !== before){
+      spawn2048();
+    }
+    render2048();
+    check2048GameOver();
+  }
+
+  function check2048GameOver(){
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++){
+      if(board2048[r][c] === 0) return;
+      if(board2048[r][c] === 2048){
+        document.getElementById('overlay2048').style.display = 'flex';
+        document.getElementById('overlayText2048').textContent = 'You reached 2048!';
+        return;
+      }
+      if(c < 3 && board2048[r][c] === board2048[r][c+1]) return;
+      if(r < 3 && board2048[r][c] === board2048[r+1][c]) return;
+    }
+    document.getElementById('overlay2048').style.display = 'flex';
+    document.getElementById('overlayText2048').textContent = 'Game Over — Score: ' + score2048;
+  }
+
+  document.addEventListener('keydown', e => {
+    const view = document.getElementById('view-game2048');
+    if(!view || !view.classList.contains('visible')) return;
+    const map = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
+    if(map[e.key]){
+      e.preventDefault();
+      move2048(map[e.key]);
+    }
+  });
+
+  init2048();
+
+  /* ---- 15 Puzzle ---- */
+  let puzzle15, puzzleMoves;
+
+  function initPuzzle15(){
+    puzzle15 = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0];
+    puzzleMoves = 0;
+    // shuffle via random valid moves so it's always solvable
+    let blank = 15;
+    for(let i=0;i<300;i++){
+      const neighbors = puzzleNeighbors(blank);
+      const swap = neighbors[Math.floor(Math.random()*neighbors.length)];
+      [puzzle15[blank], puzzle15[swap]] = [puzzle15[swap], puzzle15[blank]];
+      blank = swap;
+    }
+    document.getElementById('overlayPuzzle15').style.display = 'none';
+    document.getElementById('movesPuzzle').textContent = '0';
+    document.getElementById('movesPuzzle').dataset.countVal = '0';
+    renderPuzzle15();
+  }
+
+  function puzzleNeighbors(i){
+    const r = Math.floor(i/4), c = i%4;
+    const out = [];
+    if(r > 0) out.push(i-4);
+    if(r < 3) out.push(i+4);
+    if(c > 0) out.push(i-1);
+    if(c < 3) out.push(i+1);
+    return out;
+  }
+
+  function renderPuzzle15(){
+    const grid = document.getElementById('gridPuzzle15');
+    grid.innerHTML = '';
+    puzzle15.forEach((val, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'tile-puzzle15' + (val === 0 ? ' empty' : '');
+      if(val !== 0){
+        tile.textContent = val;
+        tile.onclick = () => movePuzzle15(i);
+      }
+      grid.appendChild(tile);
+    });
+  }
+
+  function movePuzzle15(i){
+    const blank = puzzle15.indexOf(0);
+    if(puzzleNeighbors(i).includes(blank)){
+      [puzzle15[i], puzzle15[blank]] = [puzzle15[blank], puzzle15[i]];
+      puzzleMoves++;
+      animateNumber(document.getElementById('movesPuzzle'), puzzleMoves, { duration: 250 });
+      renderPuzzle15();
+      if(puzzle15.slice(0,15).every((v, idx) => v === idx+1) && puzzle15[15] === 0){
+        document.getElementById('overlayPuzzle15').style.display = 'flex';
+      }
+    }
+  }
+
+  initPuzzle15();
+
+  /* ---- Reaction Test ---- */
+  let reactionState = 'idle'; // idle, waiting, go
+  let reactionTimeout = null;
+  let reactionStart = 0;
+  let reactionBest = null;
+
+  async function loadReactionBest(){
+    try{
+      const res = await window.storage.get('reaction-best', false);
+      if(res && res.value){
+        reactionBest = parseInt(res.value);
+        animateNumber(document.getElementById('reactionBest'), reactionBest, { suffix: 'ms' });
+      }
+    }catch(e){}
+  }
+
+  function handleReactionClick(){
+    const box = document.getElementById('reactionBox');
+    const text = document.getElementById('reactionText');
+
+    if(reactionState === 'idle'){
+      reactionState = 'waiting';
+      box.className = 'reaction-box waiting';
+      text.textContent = 'Wait for green...';
+      const delay = 1000 + Math.random()*3000;
+      reactionTimeout = setTimeout(() => {
+        reactionState = 'go';
+        box.className = 'reaction-box go';
+        text.textContent = 'Click!';
+        reactionStart = Date.now();
+      }, delay);
+    }else if(reactionState === 'waiting'){
+      clearTimeout(reactionTimeout);
+      reactionState = 'idle';
+      box.className = 'reaction-box early';
+      text.textContent = 'Too soon! Click to try again';
+      setTimeout(() => { box.className = 'reaction-box'; }, 800);
+    }else if(reactionState === 'go'){
+      const time = Date.now() - reactionStart;
+      reactionState = 'idle';
+      box.className = 'reaction-box';
+      text.textContent = 'Click to try again';
+      document.getElementById('reactionLast').dataset.countVal = '0'; // fresh count-up each attempt
+      animateNumber(document.getElementById('reactionLast'), time, { suffix: 'ms' });
+      if(reactionBest === null || time < reactionBest){
+        reactionBest = time;
+        animateNumber(document.getElementById('reactionBest'), time, { suffix: 'ms' });
+        window.storage.set('reaction-best', String(time), false).catch(() => {});
+      }
+    }
+  }
+
+  loadReactionBest();
+
+  /* ---- Ambient Sounds (procedurally generated, no audio files/network needed) ---- */
+  const SOUND_CONFIGS = [
+    { id: 'white', label: 'White Noise', buffer: 'white' },
+    { id: 'rain', label: 'Rain', buffer: 'white', rainFilter: true },
+    { id: 'brown', label: 'Deep Rumble', buffer: 'brown' },
+    { id: 'pink', label: 'Soft Static', buffer: 'pink' }
+  ];
+
+  let audioCtx = null;
+  const noiseBuffers = {};
+  const soundNodes = {};
+  const soundVolumes = {};
+
+  function ensureAudioContext(){
+    if(!audioCtx){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if(audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function generateWhiteNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for(let i = 0; i < size; i++) data[i] = Math.random() * 2 - 1;
+    return buffer;
+  }
+
+  function generateBrownNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let last = 0;
+    for(let i = 0; i < size; i++){
+      const white = Math.random() * 2 - 1;
+      last = (last + 0.02 * white) / 1.02;
+      data[i] = last * 3.5;
+    }
+    return buffer;
+  }
+
+  function generatePinkNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    for(let i = 0; i < size; i++){
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      const pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+      b6 = white * 0.115926;
+      data[i] = pink * 0.11;
+    }
+    return buffer;
+  }
+
+  function getNoiseBuffer(type){
+    if(!noiseBuffers[type]){
+      const ctx = ensureAudioContext();
+      if(type === 'white') noiseBuffers[type] = generateWhiteNoiseBuffer(ctx, 4);
+      else if(type === 'brown') noiseBuffers[type] = generateBrownNoiseBuffer(ctx, 4);
+      else if(type === 'pink') noiseBuffers[type] = generatePinkNoiseBuffer(ctx, 4);
+    }
+    return noiseBuffers[type];
+  }
+
+  function renderSoundGrid(){
+    const grid = document.getElementById('soundGrid');
+    grid.innerHTML = SOUND_CONFIGS.map(s => {
+      const vol = soundVolumes[s.id] !== undefined ? soundVolumes[s.id] : 50;
+      return `
+        <div class="sound-card" id="soundCard-${s.id}">
+          <div class="sound-card-top">
+            <div class="sound-card-title">${s.label}</div>
+            <div class="sound-toggle" id="soundToggle-${s.id}" onclick="toggleSound('${s.id}')">▶</div>
+          </div>
+          <input type="range" class="sound-volume" min="0" max="100" value="${vol}"
+                 oninput="setSoundVolume('${s.id}', this.value)">
+        </div>
+      `;
+    }).join('');
+  }
+
+  function toggleSound(id){
+    if(soundNodes[id]){
+      stopSound(id);
+    }else{
+      startSound(id);
+    }
+  }
+
+  function startSound(id){
+    const config = SOUND_CONFIGS.find(s => s.id === id);
+    const ctx = ensureAudioContext();
+    const buffer = getNoiseBuffer(config.buffer);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    let outputNode = source;
+    if(config.rainFilter){
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.value = 300;
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.value = 3200;
+      source.connect(highpass);
+      highpass.connect(lowpass);
+      outputNode = lowpass;
+    }
+
+    const gainNode = ctx.createGain();
+    const vol = soundVolumes[id] !== undefined ? soundVolumes[id] : 50;
+    gainNode.gain.value = (vol / 100) * 0.5;
+    outputNode.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    source.start();
+
+    soundNodes[id] = { source, gainNode };
+
+    const toggleBtn = document.getElementById('soundToggle-' + id);
+    const card = document.getElementById('soundCard-' + id);
+    if(toggleBtn){ toggleBtn.textContent = '❚❚'; toggleBtn.classList.add('playing'); }
+    if(card) card.classList.add('playing');
+  }
+
+  function stopSound(id){
+    const node = soundNodes[id];
+    if(node){
+      try{ node.source.stop(); }catch(e){}
+      node.source.disconnect();
+      node.gainNode.disconnect();
+    }
+    delete soundNodes[id];
+
+    const toggleBtn = document.getElementById('soundToggle-' + id);
+    const card = document.getElementById('soundCard-' + id);
+    if(toggleBtn){ toggleBtn.textContent = '▶'; toggleBtn.classList.remove('playing'); }
+    if(card) card.classList.remove('playing');
+  }
+
+  function setSoundVolume(id, value){
+    soundVolumes[id] = value;
+    if(soundNodes[id]) soundNodes[id].gainNode.gain.value = (value / 100) * 0.5;
+  }
+
+  renderSoundGrid();
+
+  /* ---- Tic-Tac-Toe ---- */
+  let tttBoard, tttOver, tttWins = 0, tttLosses = 0, tttDraws = 0;
+  let tttMode = 'unbeatable';
+
+  function setTttMode(mode){
+    tttMode = mode;
+    document.getElementById('tttModeUnbeatable').classList.toggle('active', mode === 'unbeatable');
+    document.getElementById('tttModeBeatable').classList.toggle('active', mode === 'beatable');
+    document.getElementById('tttSub').textContent = mode === 'unbeatable'
+      ? "You're X. The AI plays optimally — a draw is a good result."
+      : "You're X. The AI blocks the obvious stuff, but can't see far ahead — set up a fork and it's yours.";
+    tttWins = 0; tttLosses = 0; tttDraws = 0;
+    initTtt();
+  }
+
+  function initTtt(){
+    tttBoard = Array(9).fill(null);
+    tttOver = false;
+    document.getElementById('overlayTtt').style.display = 'none';
+    renderTtt();
+  }
+
+  function renderTtt(){
+    const grid = document.getElementById('gridTtt');
+    grid.innerHTML = '';
+    tttBoard.forEach((v, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'tile-ttt' + (v ? ' filled ' + v.toLowerCase() : '');
+      tile.textContent = v || '';
+      if(!v && !tttOver) tile.onclick = () => tttPlayerMove(i);
+      grid.appendChild(tile);
+    });
+    animateNumber(document.getElementById('tttWinsNum'), tttWins, { duration: 300 });
+    animateNumber(document.getElementById('tttLossesNum'), tttLosses, { duration: 300 });
+    animateNumber(document.getElementById('tttDrawsNum'), tttDraws, { duration: 300 });
+  }
+
+  const TTT_LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+
+  function tttWinner(board){
+    for(const [a,b,c] of TTT_LINES){
+      if(board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
+    }
+    if(board.every(v => v)) return 'draw';
+    return null;
+  }
+
+  function tttMinimax(board, isMax){
+    const winner = tttWinner(board);
+    if(winner === 'X') return -10;
+    if(winner === 'O') return 10;
+    if(winner === 'draw') return 0;
+
+    const scores = [];
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = isMax ? 'O' : 'X';
+        scores.push(tttMinimax(board, !isMax));
+        board[i] = null;
+      }
+    }
+    return isMax ? Math.max(...scores) : Math.min(...scores);
+  }
+
+  function tttBestMove(board){
+    let bestScore = -Infinity, bestMove = null;
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = 'O';
+        const score = tttMinimax(board, false);
+        board[i] = null;
+        if(score > bestScore){ bestScore = score; bestMove = i; }
+      }
+    }
+    return bestMove;
+  }
+
+  function tttRandomMove(board){
+    const empty = board.map((v,i) => v ? null : i).filter(v => v !== null);
+    return empty[Math.floor(Math.random() * empty.length)];
+  }
+
+  function tttFindImmediate(board, mark){
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = mark;
+        const win = tttWinner(board) === mark;
+        board[i] = null;
+        if(win) return i;
+      }
+    }
+    return null;
+  }
+
+  function tttEasyMove(board){
+    // Notices the obvious: takes a winning move, or blocks an immediate threat —
+    // but doesn't look further ahead, so forks and long-term traps still get past it.
+    const winMove = tttFindImmediate(board, 'O');
+    if(winMove !== null) return winMove;
+    const blockMove = tttFindImmediate(board, 'X');
+    if(blockMove !== null) return blockMove;
+    return tttRandomMove(board);
+  }
+
+  function tttAiMove(board){
+    if(tttMode === 'unbeatable') return tttBestMove(board);
+    return tttEasyMove(board);
+  }
+
+  function tttPlayerMove(i){
+    if(tttBoard[i] || tttOver) return;
+    tttBoard[i] = 'X';
+    renderTtt();
+    const winner = tttWinner(tttBoard);
+    if(winner){ tttEnd(winner); return; }
+
+    setTimeout(() => {
+      const move = tttAiMove(tttBoard);
+      if(move !== null && move !== undefined) tttBoard[move] = 'O';
+      renderTtt();
+      const w2 = tttWinner(tttBoard);
+      if(w2) tttEnd(w2);
+    }, 350);
+  }
+
+  function tttEnd(winner){
+    tttOver = true;
+    let msg;
+    if(winner === 'draw'){ tttDraws++; msg = "It's a draw!"; }
+    else if(winner === 'X'){ tttWins++; msg = 'You win!'; }
+    else { tttLosses++; msg = 'AI wins!'; }
+    renderTtt();
+    document.getElementById('overlayTtt').style.display = 'flex';
+    document.getElementById('overlayTextTtt').textContent = msg;
+  }
+
+  document.getElementById('tttModeUnbeatable').classList.add('active');
+  initTtt();
+
+  /* ---- Word Chain ---- */
+  let wordChain = [];
+
+  function renderWordChain(){
+    const el = document.getElementById('chainDisplay');
+    animateNumber(document.getElementById('chainCountNum'), wordChain.length, { duration: 400 });
+    if(wordChain.length === 0){
+      el.innerHTML = '<div class="placeholder-note">Type a word below to start the chain.</div>';
+      return;
+    }
+    el.innerHTML = wordChain.map((w, i) => {
+      const tag = `<span class="chain-word ${i % 2 === 0 ? 'you' : 'claude'}">${escapeHtml(w)}</span>`;
+      return i === 0 ? tag : `<span class="chain-arrow">→</span>${tag}`;
+    }).join('');
+  }
+
+  function resetWordChain(){
+    wordChain = [];
+    document.getElementById('wordChainFeedback').textContent = '';
+    renderWordChain();
+  }
+
+  async function submitWordChain(){
+    const input = document.getElementById('wordChainInput');
+    const word = input.value.trim();
+    const feedback = document.getElementById('wordChainFeedback');
+    feedback.textContent = '';
+    if(!word) return;
+    if(word.includes(' ')){
+      feedback.textContent = 'One word at a time.';
+      return;
+    }
+    if(wordChain.some(w => w.toLowerCase() === word.toLowerCase())){
+      feedback.textContent = 'That word is already in the chain — try another.';
+      return;
+    }
+
+    wordChain.push(word);
+    input.value = '';
+    renderWordChain();
+
+    const btn = document.getElementById('wordChainBtn');
+    btn.disabled = true;
+    feedback.innerHTML = 'Claude is thinking<span class="typing-dots"><span></span><span></span><span></span></span>';
+
+    try{
+      const usedList = wordChain.join(', ');
+      const prompt = `We're playing a word association chain game. The chain so far, in order, is: ${wordChain.join(' → ')}. Give ONE single word associated with the last word ("${word}") — a synonym, category, rhyme, common pairing, or related idea. It must not be any word already used in this chain: ${usedList}. Respond with ONLY that one word, no punctuation, no explanation.`;
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 20,
+          temperature: 1,
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
+      const data = await response.json();
+      const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      const claudeWord = textBlocks.trim().split(/\s+/)[0].replace(/[^a-zA-Z'-]/g, '');
+      if(claudeWord){
+        wordChain.push(claudeWord);
+        feedback.textContent = '';
+      }else{
+        feedback.textContent = "Claude couldn't come up with one — try adding another word.";
+      }
+    }catch(e){
+      feedback.textContent = "Something went wrong reaching Claude.";
+    }
+    renderWordChain();
+    btn.disabled = false;
+  }
+
+  /* ---- Excuse Generator ---- */
+  let excuseContext = '';
+  let excuseLevel = 1;
+
+  async function callClaudeText(prompt, maxTokens){
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens || 300,
+        temperature: 1,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    const data = await response.json();
+    return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  }
+
+  async function generateExcuse(){
+    const input = document.getElementById('excuseInput');
+    excuseContext = input.value.trim() || 'being late';
+    excuseLevel = 1;
+    await runExcuse();
+  }
+
+  async function escalateExcuse(){
+    excuseLevel++;
+    await runExcuse();
+  }
+
+  async function runExcuse(){
+    const label = document.getElementById('excuseLabel');
+    const textEl = document.getElementById('excuseText');
+    const moreBtn = document.getElementById('excuseMoreBtn');
+    label.textContent = 'Excuse for: ' + excuseContext;
+    textEl.innerHTML = skeletonBars(2);
+    moreBtn.style.display = 'none';
+
+    const escalationClause = excuseLevel > 1
+      ? ` Make it noticeably MORE absurd and over-the-top than a normal excuse — escalation level ${excuseLevel} out of increasingly ridiculous.`
+      : '';
+    const prompt = `Give me one short, funny, creative excuse for "${excuseContext}".${escalationClause} Respond with ONLY the excuse itself, 1-2 sentences, no preamble, no quotes.`;
+
+    try{
+      const text = await callClaudeText(prompt, 150);
+      textEl.textContent = text || "Couldn't think of one — try again.";
+      moreBtn.style.display = 'inline-block';
+      const levelDisplay = document.getElementById('excuseLevelDisplay');
+      levelDisplay.style.display = 'block';
+      animateNumber(document.getElementById('excuseLevelNum'), excuseLevel, { duration: 400 });
+    }catch(e){
+      textEl.textContent = "Something went wrong — try again.";
+    }
+  }
+
+  document.getElementById('excuseInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter') generateExcuse();
+  });
+
+  /* ---- Which X Are You? ---- */
+  let whichxTopic = '';
+  let whichxQuestions = [];
+  let whichxAnswers = [];
+  let whichxCurrent = 0;
+
+  async function startWhichX(){
+    whichxTopic = document.getElementById('whichxTopic').value.trim();
+    if(!whichxTopic) return;
+
+    document.getElementById('whichxSetup').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'none';
+    const quizArea = document.getElementById('whichxQuizArea');
+    quizArea.style.display = 'block';
+    document.getElementById('whichxQuestionCard').innerHTML = '<div class="riddle-text">Building your quiz...</div>';
+
+    const prompt = `Create a fun "Which ${whichxTopic} are you" personality quiz with exactly 5 multiple choice questions, each with exactly 4 short answer options. Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"questions":[{"question":"<text>","options":["<a>","<b>","<c>","<d>"]}]}`;
+
+    try{
+      const text = await callClaudeText(prompt, 900);
+      const match = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      whichxQuestions = parsed.questions || [];
+      whichxAnswers = [];
+      whichxCurrent = 0;
+      renderWhichXQuestion();
+    }catch(e){
+      document.getElementById('whichxQuestionCard').innerHTML = '<div class="riddle-text">Something went wrong building the quiz — try again.</div>';
+    }
+  }
+
+  function renderWhichXQuestion(){
+    const card = document.getElementById('whichxQuestionCard');
+    const q = whichxQuestions[whichxCurrent];
+    if(!q){ finishWhichX(); return; }
+    card.innerHTML = `
+      <div class="riddle-label">Question <span id="whichxQNum">0</span> of ${whichxQuestions.length}</div>
+      <div class="riddle-text">${escapeHtml(q.question)}</div>
+      <div class="upgrade-grid">
+        ${q.options.map((opt, i) => `<button class="timer-btn" style="width:100%;text-align:left;" onclick="answerWhichX(${i})">${escapeHtml(opt)}</button>`).join('')}
+      </div>
+    `;
+    animateNumber(document.getElementById('whichxQNum'), whichxCurrent + 1, { duration: 350 });
+  }
+
+  function answerWhichX(i){
+    whichxAnswers.push(whichxQuestions[whichxCurrent].options[i]);
+    whichxCurrent++;
+    renderWhichXQuestion();
+  }
+
+  async function finishWhichX(){
+    document.getElementById('whichxQuizArea').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'block';
+    document.getElementById('whichxResultTitle').textContent = 'Judging your result...';
+    document.getElementById('whichxResultDesc').textContent = '';
+
+    const pairs = whichxQuestions.map((q, i) => `${q.question} → ${whichxAnswers[i]}`).join(' | ');
+    const prompt = `Someone took a "Which ${whichxTopic} are you" quiz. Their question and answer pairs: ${pairs}. Based on these answers, decide which specific ${whichxTopic} they are most like, with a fun one-to-two sentence justification. Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"result":"<name>","description":"<justification>"}`;
+
+    try{
+      const text = await callClaudeText(prompt, 300);
+      const match = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      document.getElementById('whichxResultTitle').textContent = parsed.result || 'Unknown';
+      document.getElementById('whichxResultDesc').textContent = parsed.description || '';
+    }catch(e){
+      document.getElementById('whichxResultTitle').textContent = "Couldn't judge that one";
+      document.getElementById('whichxResultDesc').textContent = 'Try again in a moment.';
+    }
+  }
+
+  function resetWhichX(){
+    document.getElementById('whichxSetup').style.display = 'block';
+    document.getElementById('whichxQuizArea').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'none';
+    document.getElementById('whichxTopic').value = '';
+  }
+
+  /* ---- Decision Wheel ---- */
+  let wheelOptions = ['Option A', 'Option B', 'Option C'];
+  let wheelRotation = 0;
+  let wheelSpinning = false;
+  const WHEEL_COLORS = ['#E0AC3F', '#16234F', '#6FE0A0', '#8a6a2a', '#2A3A70', '#F0CE85'];
+
+  function renderWheelOptions(){
+    const list = document.getElementById('wheelOptionList');
+    list.innerHTML = '';
+    wheelOptions.forEach((opt, i) => {
+      const li = document.createElement('li');
+      li.className = 'task-item';
+      li.innerHTML = `<div class="task-text">${escapeHtml(opt)}</div><div class="task-del" onclick="removeWheelOption(${i})">&times;</div>`;
+      list.appendChild(li);
+    });
+    renderWheel();
+  }
+
+  function addWheelOption(){
+    const input = document.getElementById('wheelOptionInput');
+    const val = input.value.trim();
+    if(!val) return;
+    wheelOptions.push(val);
+    input.value = '';
+    renderWheelOptions();
+  }
+
+  function removeWheelOption(i){
+    if(wheelOptions.length <= 2) return;
+    wheelOptions.splice(i, 1);
+    renderWheelOptions();
+  }
+
+  function renderWheel(){
+    const wheel = document.getElementById('wheel');
+    const n = wheelOptions.length;
+    const segAngle = 360 / n;
+    const gradientParts = wheelOptions.map((opt, i) =>
+      `${WHEEL_COLORS[i % WHEEL_COLORS.length]} ${i*segAngle}deg ${(i+1)*segAngle}deg`
+    ).join(', ');
+    wheel.style.background = `conic-gradient(${gradientParts})`;
+
+    wheel.innerHTML = '';
+    wheelOptions.forEach((opt, i) => {
+      const mid = i*segAngle + segAngle/2;
+      const label = document.createElement('div');
+      label.className = 'wheel-label';
+      label.textContent = opt;
+      label.style.transform = `rotate(${mid}deg) translate(50px)`;
+      wheel.appendChild(label);
+    });
+  }
+
+  function spinWheel(){
+    if(wheelSpinning || wheelOptions.length < 2) return;
+    wheelSpinning = true;
+    document.getElementById('wheelResult').textContent = '';
+    const n = wheelOptions.length;
+    const segAngle = 360 / n;
+    const extraSpins = 5 + Math.floor(Math.random()*3);
+    const randomOffset = Math.random() * 360;
+    wheelRotation += extraSpins*360 + randomOffset;
+
+    const wheel = document.getElementById('wheel');
+    wheel.style.transform = `rotate(${wheelRotation}deg)`;
+
+    setTimeout(() => {
+      wheelSpinning = false;
+      const normalized = ((360 - (wheelRotation % 360)) % 360);
+      const index = Math.floor(normalized / segAngle) % n;
+      document.getElementById('wheelResult').textContent = 'Result: ' + wheelOptions[index];
+    }, 4100);
+  }
+
+  renderWheelOptions();
+
+  /* ---- Quick Calculator ---- */
+  let calcExpr = '';
+
+  function setCalcMode(mode){
+    document.getElementById('calcModeCalc').classList.toggle('active', mode === 'calc');
+    document.getElementById('calcModeConvert').classList.toggle('active', mode === 'convert');
+    document.getElementById('calcPanel').style.display = mode === 'calc' ? 'block' : 'none';
+    document.getElementById('convertPanel').style.display = mode === 'convert' ? 'block' : 'none';
+  }
+
+  function calcInput(ch){
+    calcExpr += ch;
+    document.getElementById('calcDisplay').textContent = calcExpr;
+  }
+
+  function calcClear(){
+    calcExpr = '';
+    document.getElementById('calcDisplay').textContent = '0';
+  }
+
+  function calcBackspace(){
+    calcExpr = calcExpr.slice(0, -1);
+    document.getElementById('calcDisplay').textContent = calcExpr || '0';
+  }
+
+  function calcEquals(){
+    if(!calcExpr) return;
+    if(!/^[0-9+\-*/().\s]+$/.test(calcExpr)){
+      document.getElementById('calcDisplay').textContent = 'Error';
+      calcExpr = '';
+      return;
+    }
+    try{
+      const result = Function('"use strict"; return (' + calcExpr + ')')();
+      const display = Number.isFinite(result) ? String(Math.round(result * 1e10) / 1e10) : 'Error';
+      document.getElementById('calcDisplay').textContent = display;
+      calcExpr = display === 'Error' ? '' : display;
+    }catch(e){
+      document.getElementById('calcDisplay').textContent = 'Error';
+      calcExpr = '';
+    }
+  }
+
+  /* ---- Unit Converter ---- */
+  const CONVERT_UNITS = {
+    length: { label: 'Length', units: { Metres:1, Kilometres:1000, Centimetres:0.01, Millimetres:0.001, Miles:1609.344, Yards:0.9144, Feet:0.3048, Inches:0.0254 } },
+    mass:   { label: 'Mass', units: { Kilograms:1, Grams:0.001, Pounds:0.45359237, Ounces:0.028349523 } },
+    volume: { label: 'Volume', units: { Litres:1, Millilitres:0.001, Gallons:3.785411784, Cups:0.24 } },
+    temperature: { label: 'Temperature', units: { Celsius:'C', Fahrenheit:'F', Kelvin:'K' } }
+  };
+
+  function populateConvertCategory(){
+    const cat = document.getElementById('convertCategory');
+    cat.innerHTML = Object.entries(CONVERT_UNITS).map(([key, val]) => `<option value="${key}">${val.label}</option>`).join('');
+    onConvertCategoryChange();
+  }
+
+  function onConvertCategoryChange(){
+    const catKey = document.getElementById('convertCategory').value;
+    const units = Object.keys(CONVERT_UNITS[catKey].units);
+    const fromSel = document.getElementById('convertFrom');
+    const toSel = document.getElementById('convertTo');
+    fromSel.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    toSel.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    if(units.length > 1) toSel.selectedIndex = 1;
+    runConvert();
+  }
+
+  function runConvert(){
+    const catKey = document.getElementById('convertCategory').value;
+    const from = document.getElementById('convertFrom').value;
+    const to = document.getElementById('convertTo').value;
+    const val = parseFloat(document.getElementById('convertInput').value);
+    const resultEl = document.getElementById('convertResult');
+
+    if(isNaN(val)){ resultEl.textContent = '0'; return; }
+
+    if(catKey === 'temperature'){
+      let celsius;
+      if(from === 'Celsius') celsius = val;
+      else if(from === 'Fahrenheit') celsius = (val - 32) * 5/9;
+      else celsius = val - 273.15;
+
+      let result;
+      if(to === 'Celsius') result = celsius;
+      else if(to === 'Fahrenheit') result = celsius * 9/5 + 32;
+      else result = celsius + 273.15;
+
+      resultEl.textContent = (Math.round(result * 100) / 100).toString();
+    }else{
+      const units = CONVERT_UNITS[catKey].units;
+      const base = val * units[from];
+      const result = base / units[to];
+      resultEl.textContent = (Math.round(result * 1e6) / 1e6).toString();
+    }
+  }
+
+  populateConvertCategory();
+
+  /* ---- Formula Sheet ---- */
+  const FORMULAS = {
+    maths: [
+      // --- KS3 ---
+      { tier: 'KS3', name: 'Perimeter of a Rectangle', expr: 'P = 2(l + w)', note: '' },
+      { tier: 'KS3', name: 'Area of a Rectangle', expr: 'A = l × w', note: '' },
+      { tier: 'KS3', name: 'Area of a Square', expr: 'A = s²', note: '' },
+      { tier: 'KS3', name: 'Area of a Parallelogram', expr: 'A = base × height', note: '' },
+      { tier: 'KS3', name: 'Area of a Trapezium', expr: 'A = ½(a + b)h', note: 'a, b = parallel sides' },
+      { tier: 'KS3', name: 'Volume of a Cuboid', expr: 'V = l × w × h', note: '' },
+      { tier: 'KS3', name: 'Volume of a Cube', expr: 'V = s³', note: '' },
+      { tier: 'KS3', name: 'Circumference of a Circle', expr: 'C = 2πr  or  C = πd', note: '' },
+      { tier: 'KS3', name: 'Area of a Circle', expr: 'A = πr²', note: '' },
+      { tier: 'KS3', name: 'Area of a Triangle', expr: 'A = ½ × base × height', note: '' },
+      { tier: 'KS3', name: 'Mean Average', expr: 'mean = sum of values / number of values', note: '' },
+      { tier: 'KS3', name: 'Range', expr: 'range = highest value - lowest value', note: '' },
+      { tier: 'KS3', name: 'Speed', expr: 'speed = distance / time', note: '' },
+      { tier: 'KS3', name: 'Percentage of an Amount', expr: '(percentage / 100) × amount', note: '' },
+      { tier: 'KS3', name: 'Simple Interest', expr: 'I = (P × R × T) / 100', note: 'P=principal, R=rate, T=time' },
+      { tier: 'KS3', name: 'Basic Probability', expr: 'P(event) = favourable outcomes / total outcomes', note: '' },
+      { tier: 'KS3', name: "Pythagoras' Theorem", expr: 'a² + b² = c²', note: 'c is the hypotenuse' },
+      { tier: 'KS3', name: 'Angle Sum of a Triangle', expr: 'sum of angles = 180°', note: '' },
+      { tier: 'KS3', name: 'Angle Sum of a Quadrilateral', expr: 'sum of angles = 360°', note: '' },
+      { tier: 'KS3', name: 'Exterior Angle of a Regular Polygon', expr: '360° / n', note: 'n = number of sides' },
+      { tier: 'KS3', name: 'Interior Angle of a Regular Polygon', expr: '((n - 2) × 180°) / n', note: '' },
+      // --- GCSE ---
+      { tier: 'GCSE', name: 'Quadratic Formula', expr: 'x = (-b ± √(b² - 4ac)) / 2a', note: 'Solves ax² + bx + c = 0' },
+      { tier: 'GCSE', name: 'Completing the Square', expr: 'x² + bx = (x + b/2)² - (b/2)²', note: '' },
+      { tier: 'GCSE', name: 'Difference of Two Squares', expr: 'a² - b² = (a + b)(a - b)', note: '' },
+      { tier: 'GCSE', name: 'Laws of Indices', expr: 'aᵐ×aⁿ=aᵐ⁺ⁿ,  aᵐ/aⁿ=aᵐ⁻ⁿ,  (aᵐ)ⁿ=aᵐⁿ,  a⁰=1,  a⁻ⁿ=1/aⁿ', note: '' },
+      { tier: 'GCSE', name: 'Arc Length', expr: 'L = (θ/360) × 2πr', note: 'θ in degrees' },
+      { tier: 'GCSE', name: 'Sector Area', expr: 'A = (θ/360) × πr²', note: 'θ in degrees' },
+      { tier: 'GCSE', name: 'Trigonometric Ratios', expr: 'sinθ = opp/hyp, cosθ = adj/hyp, tanθ = opp/adj', note: 'SOH CAH TOA' },
+      { tier: 'GCSE', name: 'Sine Rule', expr: 'a/sinA = b/sinB = c/sinC', note: '' },
+      { tier: 'GCSE', name: 'Cosine Rule', expr: 'a² = b² + c² - 2bc·cosA', note: '' },
+      { tier: 'GCSE', name: 'Area of a Triangle (Trig)', expr: 'A = ½ab·sinC', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Cylinder', expr: 'V = πr²h', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Sphere', expr: 'V = (4/3)πr³', note: '' },
+      { tier: 'GCSE', name: 'Surface Area of a Sphere', expr: 'A = 4πr²', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Cone', expr: 'V = (1/3)πr²h', note: '' },
+      { tier: 'GCSE', name: 'Curved Surface Area of a Cone', expr: 'A = πrl', note: 'l = slant height' },
+      { tier: 'GCSE', name: 'Volume of a Pyramid', expr: 'V = (1/3) × base area × height', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Prism', expr: 'V = cross-sectional area × length', note: '' },
+      { tier: 'GCSE', name: 'Gradient of a Line', expr: 'm = (y₂ - y₁) / (x₂ - x₁)', note: '' },
+      { tier: 'GCSE', name: 'Equation of a Line', expr: 'y = mx + c', note: 'm = gradient, c = y-intercept' },
+      { tier: 'GCSE', name: 'Midpoint of a Line', expr: '((x₁+x₂)/2, (y₁+y₂)/2)', note: '' },
+      { tier: 'GCSE', name: 'Distance Between Two Points', expr: 'd = √((x₂-x₁)² + (y₂-y₁)²)', note: '' },
+      { tier: 'GCSE', name: 'Compound Interest', expr: 'A = P(1 + r/100)ⁿ', note: '' },
+      { tier: 'GCSE', name: 'nth Term (Arithmetic)', expr: 'aₙ = a + (n - 1)d', note: '' },
+      { tier: 'GCSE', name: 'nth Term (Geometric)', expr: 'aₙ = ar⁽ⁿ⁻¹⁾', note: '' },
+      { tier: 'GCSE', name: 'Sum of Arithmetic Series', expr: 'Sₙ = (n/2)(2a + (n-1)d)', note: '' },
+      { tier: 'GCSE', name: 'Sum of Geometric Series', expr: 'Sₙ = a(1-rⁿ)/(1-r)', note: 'r ≠ 1' },
+      { tier: 'GCSE', name: 'Independent Events (AND)', expr: 'P(A and B) = P(A) × P(B)', note: '' },
+      { tier: 'GCSE', name: 'Mutually Exclusive Events (OR)', expr: 'P(A or B) = P(A) + P(B)', note: '' },
+      { tier: 'GCSE', name: 'Standard Deviation', expr: 'σ = √(Σ(x - mean)² / n)', note: '' },
+      { tier: 'GCSE', name: 'Magnitude of a Vector', expr: '|v| = √(x² + y²)', note: '' },
+      { tier: 'GCSE', name: 'Upper and Lower Bounds', expr: 'bound = measured value ± ½ × unit of accuracy', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Differentiation (Power Rule)', expr: 'd/dx(xⁿ) = nxⁿ⁻¹', note: '' },
+      { tier: 'A-Level', name: 'Product Rule', expr: 'd/dx(uv) = u\'v + uv\'', note: '' },
+      { tier: 'A-Level', name: 'Quotient Rule', expr: "d/dx(u/v) = (u'v - uv') / v²", note: '' },
+      { tier: 'A-Level', name: 'Chain Rule', expr: 'dy/dx = (dy/du) × (du/dx)', note: '' },
+      { tier: 'A-Level', name: 'Integration (Power Rule)', expr: '∫xⁿ dx = xⁿ⁺¹/(n+1) + c', note: 'n ≠ -1' },
+      { tier: 'A-Level', name: 'Trapezium Rule (Approx. Integration)', expr: '∫y dx ≈ ½h[(y₀+yₙ) + 2(y₁+...+yₙ₋₁)]', note: '' },
+      { tier: 'A-Level', name: 'Pythagorean Trig Identity', expr: 'sin²θ + cos²θ = 1', note: '' },
+      { tier: 'A-Level', name: 'Tan Identity', expr: 'tanθ = sinθ / cosθ', note: '' },
+      { tier: 'A-Level', name: 'Double Angle (Sine)', expr: 'sin2θ = 2sinθcosθ', note: '' },
+      { tier: 'A-Level', name: 'Double Angle (Cosine)', expr: 'cos2θ = cos²θ - sin²θ', note: '' },
+      { tier: 'A-Level', name: 'Radians: Arc Length', expr: 'L = rθ', note: 'θ in radians' },
+      { tier: 'A-Level', name: 'Radians: Sector Area', expr: 'A = ½r²θ', note: 'θ in radians' },
+      { tier: 'A-Level', name: 'Laws of Logarithms', expr: 'log(ab) = log a + log b,  log(a/b) = log a - log b,  log(aⁿ) = n·log a', note: '' },
+      { tier: 'A-Level', name: 'Exponential Growth/Decay', expr: 'N = N₀e^(kt)', note: 'k negative for decay' },
+      { tier: 'A-Level', name: 'Binomial Coefficient', expr: 'ⁿCᵣ = n! / (r!(n-r)!)', note: '' },
+      { tier: 'A-Level', name: 'Binomial Expansion', expr: '(a+b)ⁿ = Σ ⁿCᵣ aⁿ⁻ʳbʳ', note: '' },
+      { tier: 'A-Level', name: 'Sum to Infinity (Geometric)', expr: 'S∞ = a / (1 - r)', note: '|r| < 1' },
+      { tier: 'A-Level', name: 'Vector Dot Product', expr: 'a·b = |a||b|cosθ', note: '' },
+      { tier: 'A-Level', name: 'Normal Distribution (Standardising)', expr: 'z = (x - μ) / σ', note: '' },
+      { tier: 'A-Level', name: 'Newton-Raphson Method', expr: 'xₙ₊₁ = xₙ - f(xₙ)/f\'(xₙ)', note: '' }
+    ],
+    physics: [
+      // --- KS3 ---
+      { tier: 'KS3', name: 'Speed', expr: 'v = d / t', note: '' },
+      { tier: 'KS3', name: 'Density', expr: 'ρ = m / V', note: '' },
+      { tier: 'KS3', name: 'Weight', expr: 'W = mg', note: 'g ≈ 9.8 m/s² on Earth' },
+      { tier: 'KS3', name: 'Pressure', expr: 'P = F / A', note: '' },
+      { tier: 'KS3', name: 'Work Done', expr: 'W = Fd', note: '' },
+      // --- GCSE ---
+      { tier: 'GCSE', name: 'Acceleration', expr: 'a = (v - u) / t', note: '' },
+      { tier: 'GCSE', name: "Newton's Second Law", expr: 'F = ma', note: '' },
+      { tier: 'GCSE', name: 'Momentum', expr: 'p = mv', note: '' },
+      { tier: 'GCSE', name: 'Impulse', expr: 'Impulse = FΔt = Δp', note: '' },
+      { tier: 'GCSE', name: 'Kinetic Energy', expr: 'KE = ½mv²', note: '' },
+      { tier: 'GCSE', name: 'Gravitational Potential Energy', expr: 'GPE = mgh', note: '' },
+      { tier: 'GCSE', name: 'Elastic Potential Energy', expr: 'Eₑ = ½kx²', note: '' },
+      { tier: 'GCSE', name: 'Power', expr: 'P = E / t', note: '' },
+      { tier: 'GCSE', name: 'Moments', expr: 'M = F × d', note: 'Turning effect of a force' },
+      { tier: 'GCSE', name: 'SUVAT: v = u + at', expr: 'v = u + at', note: '' },
+      { tier: 'GCSE', name: 'SUVAT: s = ut + ½at²', expr: 's = ut + ½at²', note: '' },
+      { tier: 'GCSE', name: 'SUVAT: v² = u² + 2as', expr: 'v² = u² + 2as', note: '' },
+      { tier: 'GCSE', name: "Ohm's Law", expr: 'V = IR', note: '' },
+      { tier: 'GCSE', name: 'Electrical Power', expr: 'P = VI', note: '' },
+      { tier: 'GCSE', name: 'Charge', expr: 'Q = It', note: '' },
+      { tier: 'GCSE', name: 'Energy Transferred (Electrical)', expr: 'E = QV', note: '' },
+      { tier: 'GCSE', name: 'Resistors in Series', expr: 'R_total = R₁ + R₂ + ...', note: '' },
+      { tier: 'GCSE', name: 'Resistors in Parallel', expr: '1/R_total = 1/R₁ + 1/R₂ + ...', note: '' },
+      { tier: 'GCSE', name: 'Wave Speed', expr: 'v = fλ', note: '' },
+      { tier: 'GCSE', name: 'Frequency-Period Relation', expr: 'f = 1 / T', note: '' },
+      { tier: 'GCSE', name: 'Refractive Index (Basic)', expr: 'n = sinθᵢ / sinθᵣ', note: '' },
+      { tier: 'GCSE', name: "Hooke's Law", expr: 'F = kx', note: '' },
+      { tier: 'GCSE', name: 'Efficiency', expr: '(useful output / total input) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Specific Heat Capacity', expr: 'Q = mcΔT', note: '' },
+      { tier: 'GCSE', name: 'Specific Latent Heat', expr: 'Q = mL', note: '' },
+      { tier: 'GCSE', name: 'Nuclear Decay (Activity)', expr: 'A = ΔN / Δt', note: '' },
+      { tier: 'GCSE', name: 'Centripetal Force', expr: 'F = mv² / r', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Pressure in a Fluid', expr: 'P = ρgh', note: '' },
+      { tier: 'A-Level', name: 'Angular Velocity', expr: 'ω = v/r = 2π/T', note: '' },
+      { tier: 'A-Level', name: "Newton's Law of Gravitation", expr: 'F = Gm₁m₂ / r²', note: '' },
+      { tier: 'A-Level', name: 'Gravitational Field Strength', expr: 'g = GM / r²', note: '' },
+      { tier: 'A-Level', name: "Coulomb's Law", expr: 'F = kq₁q₂ / r²', note: '' },
+      { tier: 'A-Level', name: 'Electric Field Strength', expr: 'E = F / Q', note: '' },
+      { tier: 'A-Level', name: 'Capacitance', expr: 'C = Q / V', note: '' },
+      { tier: 'A-Level', name: 'Energy Stored in a Capacitor', expr: 'E = ½QV = ½CV²', note: '' },
+      { tier: 'A-Level', name: 'RC Time Constant', expr: 'τ = RC', note: '' },
+      { tier: 'A-Level', name: 'Simple Harmonic Motion (Acceleration)', expr: 'a = -ω²x', note: '' },
+      { tier: 'A-Level', name: 'SHM Period (Mass-Spring)', expr: 'T = 2π√(m/k)', note: '' },
+      { tier: 'A-Level', name: 'Photon Energy', expr: 'E = hf', note: 'h = Planck constant' },
+      { tier: 'A-Level', name: 'De Broglie Wavelength', expr: 'λ = h / p', note: '' },
+      { tier: 'A-Level', name: 'Mass-Energy Equivalence', expr: 'E = mc²', note: '' },
+      { tier: 'A-Level', name: 'Radioactive Decay', expr: 'N = N₀e^(-λt)', note: '' },
+      { tier: 'A-Level', name: 'Half-Life (Decay Constant)', expr: 't½ = ln2 / λ', note: '' },
+      { tier: 'A-Level', name: 'Snell\'s Law', expr: 'n₁sinθ₁ = n₂sinθ₂', note: '' },
+      { tier: 'A-Level', name: 'Force on a Current-Carrying Wire', expr: 'F = BIL', note: '' },
+      { tier: 'A-Level', name: 'Force on a Moving Charge', expr: 'F = qvB', note: '' },
+      { tier: 'A-Level', name: "Faraday's Law (Induced EMF)", expr: 'ε = -ΔΦ / Δt', note: '' },
+      { tier: 'A-Level', name: 'Transformer Equation', expr: 'Vₚ/Vₛ = Nₚ/Nₛ', note: '' }
+    ],
+    chemistry: [
+      // --- KS3/GCSE basics ---
+      { tier: 'GCSE', name: 'Moles', expr: 'n = m / M', note: 'm = mass, M = molar mass' },
+      { tier: 'GCSE', name: 'Relative Formula Mass', expr: 'Mr = sum of relative atomic masses', note: '' },
+      { tier: 'GCSE', name: 'Moles from Gas Volume (RTP)', expr: 'n = V(dm³) / 24', note: 'At room temperature and pressure' },
+      { tier: 'GCSE', name: 'Concentration', expr: 'c = n / V', note: '' },
+      { tier: 'GCSE', name: 'Dilution Formula', expr: 'c₁V₁ = c₂V₂', note: '' },
+      { tier: 'GCSE', name: 'Titration (Mole Ratio)', expr: 'c₁V₁ / n₁ = c₂V₂ / n₂', note: '' },
+      { tier: 'GCSE', name: 'Percentage Yield', expr: '(actual / theoretical) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Atom Economy', expr: '(Mr of desired product / total Mr of products) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Percentage Composition', expr: '(mass of element / Mr) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Rate of Reaction', expr: 'rate = amount used or made / time', note: '' },
+      { tier: 'GCSE', name: 'pH', expr: 'pH = -log[H⁺]', note: '' },
+      { tier: 'GCSE', name: 'Energy Change', expr: 'q = mcΔT', note: 'c = specific heat capacity' },
+      { tier: 'GCSE', name: 'Bond Energy Calculations', expr: 'ΔH = (energy to break bonds) - (energy released forming bonds)', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Ideal Gas Law', expr: 'PV = nRT', note: '' },
+      { tier: 'A-Level', name: 'Rate Equation', expr: 'rate = k[A]ᵐ[B]ⁿ', note: '' },
+      { tier: 'A-Level', name: 'Arrhenius Equation', expr: 'k = Ae^(-Ea/RT)', note: '' },
+      { tier: 'A-Level', name: 'Equilibrium Constant (Kc)', expr: 'Kc = [products]/[reactants]', note: 'raised to stoichiometric powers' },
+      { tier: 'A-Level', name: 'Ionic Product of Water', expr: 'Kw = [H⁺][OH⁻] = 10⁻¹⁴', note: 'at 25°C' },
+      { tier: 'A-Level', name: 'pKa', expr: 'pKa = -log(Ka)', note: '' },
+      { tier: 'A-Level', name: 'Henderson-Hasselbalch Equation', expr: 'pH = pKa + log([A⁻]/[HA])', note: '' },
+      { tier: 'A-Level', name: "Faraday's Law (Electrolysis)", expr: 'moles of electrons = Q / F', note: 'Q = It' },
+      { tier: 'A-Level', name: 'Standard Cell Potential', expr: 'E°cell = E°cathode - E°anode', note: '' },
+      { tier: 'A-Level', name: 'Gibbs Free Energy', expr: 'ΔG = ΔH - TΔS', note: '' }
+    ],
+    biology: [
+      { tier: 'GCSE', name: 'Magnification', expr: 'magnification = image size / actual size', note: '' },
+      { tier: 'GCSE', name: 'Rate of Reaction/Process', expr: 'rate = 1 / time', note: '' },
+      { tier: 'GCSE', name: 'Surface Area to Volume Ratio', expr: 'SA:V = surface area / volume', note: 'Higher ratio = faster exchange' },
+      { tier: 'GCSE', name: 'Percentage Change', expr: '((new - original) / original) × 100%', note: 'Used in osmosis/diffusion practicals' },
+      { tier: 'A-Level', name: 'Cardiac Output', expr: 'CO = stroke volume × heart rate', note: '' },
+      { tier: 'A-Level', name: 'Population Estimate (Quadrat Sampling)', expr: '(total area / quadrat area) × mean count per quadrat', note: '' },
+      { tier: 'A-Level', name: 'Mark-Release-Recapture (Lincoln Index)', expr: 'population = (n₁ × n₂) / n₃', note: '' },
+      { tier: 'A-Level', name: 'Body Mass Index', expr: 'BMI = mass (kg) / height (m)²', note: '' }
+    ]
+  };
+
+  const FORMULA_SUBJECT_LABEL = { maths: 'Maths', physics: 'Physics', chemistry: 'Chemistry', biology: 'Biology' };
+  const TIER_CLASS = { 'KS3': 'tier-ks3', 'GCSE': 'tier-gcse', 'A-Level': 'tier-alevel' };
+  let currentFormulaTab = 'maths';
+
+  function formulaCardHtml(f, showSubject){
+    return `
+      <div class="formula-card">
+        <div class="formula-tags">
+          ${showSubject ? `<div class="formula-subject-tag">${FORMULA_SUBJECT_LABEL[f.subject]}</div>` : ''}
+          <div class="formula-tier-tag ${TIER_CLASS[f.tier] || ''}">${f.tier}</div>
+        </div>
+        <div class="formula-name">${escapeHtml(f.name)}</div>
+        <div class="formula-expr">${escapeHtml(f.expr)}</div>
+        ${f.note ? `<div class="formula-note">${escapeHtml(f.note)}</div>` : ''}
+      </div>
+    `;
+  }
+
+  function renderFormulas(){
+    const query = document.getElementById('formulaSearch').value.trim().toLowerCase();
+    const grid = document.getElementById('formulaGrid');
+
+    if(query){
+      let results = [];
+      Object.entries(FORMULAS).forEach(([subject, list]) => {
+        list.forEach(f => {
+          if(f.name.toLowerCase().includes(query) || f.expr.toLowerCase().includes(query) || f.note.toLowerCase().includes(query)){
+            results.push({ ...f, subject });
+          }
+        });
+      });
+      grid.innerHTML = results.length
+        ? results.map(f => formulaCardHtml(f, true)).join('')
+        : '<div class="placeholder-note">No formulas match that search.</div>';
+    }else{
+      grid.innerHTML = FORMULAS[currentFormulaTab].map(f => formulaCardHtml(f, false)).join('');
+    }
+  }
+
+  function setFormulaTab(tab){
+    currentFormulaTab = tab;
+    document.getElementById('formulaTabMaths').classList.toggle('active', tab === 'maths');
+    document.getElementById('formulaTabPhysics').classList.toggle('active', tab === 'physics');
+    document.getElementById('formulaTabChemistry').classList.toggle('active', tab === 'chemistry');
+    document.getElementById('formulaTabBiology').classList.toggle('active', tab === 'biology');
+    document.getElementById('formulaSearch').value = '';
+    renderFormulas();
+  }
+
+  setFormulaTab('maths');
+
+  /* ---- Vocabulary Builder ---- */
+  let vocabList = [];
+
+  async function loadVocab(){
+    try{
+      const res = await window.storage.get('vocab-list', false);
+      vocabList = res && res.value ? JSON.parse(res.value) : [];
+    }catch(e){ vocabList = []; }
+    renderVocab();
+  }
+
+  async function saveVocabList(){
+    try{ await window.storage.set('vocab-list', JSON.stringify(vocabList), false); }catch(e){}
+  }
+
+  function renderVocab(){
+    const grid = document.getElementById('vocabGrid');
+    animateNumber(document.getElementById('vocabCountNum'), vocabList.length, { duration: 400 });
+    if(vocabList.length === 0){
+      grid.innerHTML = '<div class="placeholder-note">No words saved yet — generate some above.</div>';
+      return;
+    }
+    grid.innerHTML = vocabList.slice().reverse().map((v, revIdx) => {
+      const i = vocabList.length - 1 - revIdx;
+      return `
+        <div class="vocab-card">
+          <div class="vocab-del" onclick="deleteVocabWord(${i})">&times;</div>
+          <div class="vocab-word">${escapeHtml(v.word)}</div>
+          <div class="vocab-def">${escapeHtml(v.definition)}</div>
+          <div class="vocab-example">"${escapeHtml(v.example)}"</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function generateVocab(){
+    const topicInput = document.getElementById('vocabTopic');
+    const topic = topicInput.value.trim() || 'general advanced vocabulary';
+    const feedback = document.getElementById('vocabFeedback');
+    const btn = document.getElementById('vocabGenBtn');
+
+    btn.disabled = true;
+    feedback.textContent = '';
+    const grid = document.getElementById('vocabGrid');
+    const skeletonCard = `
+      <div class="vocab-card">
+        <div class="skeleton" style="width:45%;height:18px;margin-bottom:10px;"></div>
+        <div class="skeleton" style="width:92%;margin-bottom:6px;"></div>
+        <div class="skeleton" style="width:68%;"></div>
+      </div>
+    `;
+    grid.insertAdjacentHTML('afterbegin', skeletonCard.repeat(2));
+
+    const existingWords = vocabList.map(v => v.word).slice(-40).join(', ');
+    const avoidClause = existingWords ? ` Do not repeat any of these already-saved words: ${existingWords}.` : '';
+    const prompt = `Give me 5 useful vocabulary words related to "${topic}". For each, provide the word, a clear simple definition, and one example sentence using it.${avoidClause} Respond with ONLY a raw JSON array, no markdown fences, no explanation, in exactly this shape: [{"word":"<word>","definition":"<definition>","example":"<example sentence>"}, ...]`;
+
+    try{
+      const text = await callClaudeText(prompt, 700);
+      const match = text.match(/\[[\s\S]*\]/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      parsed.forEach(entry => {
+        if(entry.word && entry.definition){
+          vocabList.push({ word: entry.word, definition: entry.definition, example: entry.example || '' });
+        }
+      });
+      await saveVocabList();
+      renderVocab();
+      feedback.textContent = '';
+    }catch(e){
+      feedback.textContent = "Something went wrong generating words — try again.";
+    }
+    btn.disabled = false;
+  }
+
+  function deleteVocabWord(i){
+    vocabList.splice(i, 1);
+    saveVocabList();
+    renderVocab();
+  }
+
+  let vocabClearConfirming = false;
+  let vocabClearTimeout = null;
+
+  async function clearVocab(){
+    const btn = document.getElementById('vocabClearBtn');
+    if(vocabList.length === 0) return;
+
+    if(!vocabClearConfirming){
+      vocabClearConfirming = true;
+      btn.textContent = 'Click again to confirm';
+      vocabClearTimeout = setTimeout(() => {
+        vocabClearConfirming = false;
+        btn.textContent = 'Clear All';
+      }, 3000);
+      return;
+    }
+
+    clearTimeout(vocabClearTimeout);
+    vocabClearConfirming = false;
+    btn.textContent = 'Clear All';
+    vocabList = [];
+    await saveVocabList();
+    renderVocab();
+  }
+
+  document.getElementById('vocabTopic').addEventListener('keydown', e => {
+    if(e.key === 'Enter') generateVocab();
+  });
+
+  loadVocab();
+
+</script>
+
+<script>
+  /* ---- Clock widget ---- */
+  function updateClock(){
+    const now = new Date();
+    document.getElementById('clockTime').textContent = now.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+    document.getElementById('clockDate').textContent = now.toLocaleDateString(undefined, {weekday:'long', day:'numeric', month:'long'});
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  /* ---- Weather widget ---- */
+  async function fetchWeather(){
+    try{
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 300,
+          messages: [
+            { role: "user", content: "Search for the current weather right now in London, UK. Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {\"temp_c\": <number>, \"condition\": \"<short text like 'Partly cloudy'>\"}" }
+          ],
+          tools: [{ type: "web_search_20250305", name: "web_search" }]
+        })
+      });
+      const data = await response.json();
+      const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+      const match = textBlocks.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : textBlocks);
+      animateNumber(document.getElementById('weatherTemp'), Math.round(parsed.temp_c), { suffix: '°C' });
+      document.getElementById('weatherDesc').textContent = parsed.condition;
+    }catch(e){
+      document.getElementById('weatherTemp').textContent = '--°';
+      document.getElementById('weatherDesc').textContent = "Couldn't load weather";
+    }
+  }
+  fetchWeather();
+
+  /* ---- CS fact rotator (live via Claude) ---- */
+  const FALLBACK_FACTS = [
+    "The first computer bug was an actual moth, found stuck in a Harvard Mark II relay in 1947.",
+    "The QWERTY keyboard layout was designed to slow typists down and stop mechanical typewriters jamming.",
+    "The term 'debugging' predates computers — Thomas Edison used it to describe fixing his inventions in the 1870s.",
+    "A single Google search uses more computing power than the entire Apollo 11 moon landing.",
+    "The first computer programmer is widely considered to be Ada Lovelace, writing algorithms for Babbage's Analytical Engine in the 1840s.",
+    "Python is named after Monty Python's Flying Circus, not the snake.",
+    "The '@' symbol was chosen for email addresses in 1971 simply because it was unlikely to appear in anyone's name.",
+    "There are more possible chess games than atoms in the observable universe — roughly 10^120 versus 10^80.",
+    "The first 1GB hard drive, released in 1980, weighed about 250kg and cost $40,000.",
+    "Binary search is so efficient it can find a single item in a billion sorted records in about 30 comparisons.",
+    "The word 'algorithm' comes from the name of the 9th-century Persian mathematician Al-Khwarizmi.",
+    "More than half of the internet's traffic today comes from automated bots, not humans."
+  ];
+
+  let shownFacts = [];
+  let activeEl = null;
+  let inactiveEl = null;
+
+  async function generateFact(){
+    try{
+      const avoidList = shownFacts.slice(-15).join(' | ');
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 150,
+          messages: [{
+            role: "user",
+            content: `Give me one interesting, true, concise computer science fact — 1 to 2 sentences, under 200 characters. Respond with ONLY the fact text, no preamble, no quotes, no markdown formatting.${avoidList ? " Do not repeat or closely resemble any of these already-shown facts: " + avoidList : ""}`
+          }]
+        })
+      });
+      const data = await response.json();
+      const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+      return text || null;
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function nextFactText(){
+    const generated = await generateFact();
+    const fact = generated || FALLBACK_FACTS[Math.floor(Math.random() * FALLBACK_FACTS.length)];
+    shownFacts.push(fact);
+    if(shownFacts.length > 20) shownFacts.shift();
+    return fact;
+  }
+
+  async function initFacts(){
+    activeEl = document.getElementById('factA');
+    inactiveEl = document.getElementById('factB');
+    const first = await nextFactText();
+    activeEl.textContent = first;
+    activeEl.classList.add('shown');
+  }
+
+  async function rotateFact(){
+    const fact = await nextFactText(); // generated while the current fact stays fully visible
+    inactiveEl.textContent = fact;
+    void inactiveEl.offsetWidth; // force reflow so the fade-in transition triggers
+    inactiveEl.classList.add('shown');
+    activeEl.classList.remove('shown'); // old and new cross-fade at the same time, no gap
+    [activeEl, inactiveEl] = [inactiveEl, activeEl];
+  }
+
+  initFacts().then(() => {
+    setInterval(rotateFact, 15000);
+  });
+
+  typeTitle('welcome');
+</script>
+
+</body>
+</html>
