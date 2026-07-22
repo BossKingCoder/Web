@@ -23,6 +23,7 @@
     --accent-teal:#4FB8C4;
     --accent-orange:#E0875C;
     --accent-violet:#9B85D6;
+    --accent-blue:#5B8DEF;
   }
   *{box-sizing:border-box;}
 
@@ -119,8 +120,8 @@
     .view{transition:none;}
   }
 
-  /* ---- Hub background atmosphere (Home, Study, Entertainment, Game hubs only) ---- */
-  #view-home, #view-study, #view-entertainment, #view-games{
+  /* ---- Hub background atmosphere (Home, Study, Entertainment, Game, Utilities hubs only) ---- */
+  #view-home, #view-study, #view-entertainment, #view-games, #view-utilities{
     background-image:
       repeating-linear-gradient(180deg, rgba(224,172,63,0.028) 0px, rgba(224,172,63,0.028) 1px, transparent 1px, transparent 28px),
       repeating-linear-gradient(90deg, rgba(224,172,63,0.022) 0px, rgba(224,172,63,0.022) 1px, transparent 1px, transparent 28px),
@@ -143,6 +144,11 @@
   #view-games .cursor{background:var(--accent-teal);}
   #view-games .hub-icon svg{stroke:var(--accent-teal);}
   #view-games .hub-card:hover{border-color:var(--accent-teal);box-shadow:0 10px 24px rgba(79,184,196,0.22);}
+
+  #view-utilities h2{color:var(--accent-blue);}
+  #view-utilities .cursor{background:var(--accent-blue);}
+  #view-utilities .hub-icon svg{stroke:var(--accent-blue);}
+  #view-utilities .hub-card:hover{border-color:var(--accent-blue);box-shadow:0 10px 24px rgba(91,141,239,0.22);}
 
   /* ---- Hero ---- */
   .hero{
@@ -737,6 +743,10 @@
         <div class="hub-card-title">Entertainment Hub</div>
         <div class="hub-card-desc">Playlists, games, and anything else that's just for fun.</div>
       </div>
+      <div class="hub-card" onclick="switchView('utilities')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a3 3 0 0 0-4.24 4.24L4 17l3 3 6.46-6.46a3 3 0 0 0 4.24-4.24l-2.3 2.3-2-2 2.3-2.3z"/></svg></div>
+        <div class="hub-card-title">Utilities Hub</div>
+        <div class="hub-card-desc">Small everyday tools — calculator, QR codes, passwords, and more.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -795,10 +805,6 @@
       <div class="hub-card" onclick="switchView('timer')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
         <div class="hub-card-title">Focus Timer</div>
         <div class="hub-card-desc">20 minutes focused, 5 minutes off — back to back, for as long as you need.</div>
-      </div>
-      <div class="hub-card" onclick="switchView('calc')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><circle cx="8" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="8" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="15" r=".6" fill="currentColor" stroke="none"/></svg></div>
-        <div class="hub-card-title">Quick Calculator</div>
-        <div class="hub-card-desc">A calculator and a unit converter, in one place.</div>
       </div>
       <div class="hub-card" onclick="switchView('formulas')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M17 4H7l5 8-5 8h10"/></svg></div>
         <div class="hub-card-title">Formula Sheet</div>
@@ -945,9 +951,40 @@
         <div class="hub-card-title">Which X Are You?</div>
         <div class="hub-card-desc">Name any topic, take a quiz, get an AI-judged result.</div>
       </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-utilities">
+  <main>
+    <div class="view-head">
+      <h2 id="title-utilities"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Small everyday tools — click into any of them.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('calc')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><circle cx="8" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="8" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="15" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Quick Calculator</div>
+        <div class="hub-card-desc">A calculator and a unit converter, in one place.</div>
+      </div>
       <div class="hub-card" onclick="switchView('wheel')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="3" x2="12" y2="21"/><line x1="3" y1="12" x2="21" y2="12"/></svg></div>
         <div class="hub-card-title">Decision Wheel</div>
         <div class="hub-card-desc">Type your options, spin, let it decide for you.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('password')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+        <div class="hub-card-title">Password Generator</div>
+        <div class="hub-card-desc">Random, strong passwords — pick the length and character types.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('counter')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></div>
+        <div class="hub-card-title">Word Counter</div>
+        <div class="hub-card-desc">Paste text — get word count, character count, and reading time.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('countdown')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg></div>
+        <div class="hub-card-title">Countdown Timer</div>
+        <div class="hub-card-desc">Track how long until any date you set.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('qrcode')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM19 14h2v2h-2zM14 19h2v2h-2zM19 19h2v2h-2z"/></svg></div>
+        <div class="hub-card-title">QR Code Generator</div>
+        <div class="hub-card-desc">Turn any text or link into a scannable QR code.</div>
       </div>
     </div>
   </main>
@@ -1205,6 +1242,81 @@
   </main>
 </div>
 
+<div class="view" id="view-password">
+  <main>
+    <div class="view-head">
+      <h2>Password Generator</h2>
+      <div class="view-sub">Generated locally in your browser — never sent anywhere.</div>
+    </div>
+    <div class="riddle-card" style="max-width:500px;">
+      <div class="riddle-text" id="passwordOutput" style="font-family:'IBM Plex Mono',monospace;font-size:20px;word-break:break-all;">Click Generate below</div>
+    </div>
+    <div style="margin:18px 0;max-width:500px;">
+      <label style="font-size:13px;color:var(--slate);display:block;margin-bottom:8px;">Length: <span id="passwordLengthVal">16</span></label>
+      <input type="range" id="passwordLength" min="6" max="32" value="16" style="width:100%;accent-color:var(--accent-blue);" oninput="document.getElementById('passwordLengthVal').textContent=this.value">
+    </div>
+    <div class="upgrade-grid" style="max-width:500px;grid-template-columns:1fr 1fr;">
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passUpper" checked> Uppercase (A-Z)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passLower" checked> Lowercase (a-z)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passNumbers" checked> Numbers (0-9)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passSymbols" checked> Symbols (!@#$)</label>
+    </div>
+    <div style="margin-top:18px;display:flex;gap:10px;">
+      <button class="timer-btn primary" onclick="generatePassword()">Generate</button>
+      <button class="timer-btn" onclick="copyPassword()">Copy</button>
+    </div>
+    <div class="riddle-feedback" id="passwordFeedback"></div>
+  </main>
+</div>
+
+<div class="view" id="view-counter">
+  <main>
+    <div class="view-head">
+      <h2>Word Counter</h2>
+      <div class="view-sub">Paste or type — stats update as you go.</div>
+    </div>
+    <textarea id="counterInput" oninput="updateCounter()" placeholder="Start typing or paste text here..." style="width:100%;min-height:220px;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:16px;border-radius:8px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;resize:vertical;margin-bottom:18px;"></textarea>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(120px,1fr));gap:12px;">
+      <div class="clicker-stat"><div class="cs-label">Words</div><div class="cs-value" id="counterWords">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Characters</div><div class="cs-value" id="counterChars">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">No Spaces</div><div class="cs-value" id="counterCharsNoSpace">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Sentences</div><div class="cs-value" id="counterSentences">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Read Time</div><div class="cs-value" id="counterReadTime">0s</div></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-countdown">
+  <main>
+    <div class="view-head">
+      <h2>Countdown Timer</h2>
+      <div class="view-sub">Add a date, watch the countdown tick down live.</div>
+    </div>
+    <div class="quick-add">
+      <input id="countdownLabel" placeholder="What's it counting down to? (e.g. Exam, Birthday)">
+      <input type="date" id="countdownDate" style="flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;">
+      <button onclick="addCountdown()">Add</button>
+    </div>
+    <div class="sound-grid" id="countdownGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-qrcode">
+  <main>
+    <div class="view-head">
+      <h2>QR Code Generator</h2>
+      <div class="view-sub">Type text or a link — the QR code updates live.</div>
+    </div>
+    <div class="quick-add">
+      <input id="qrInput" placeholder="Enter text or a URL..." oninput="updateQR()">
+    </div>
+    <div class="riddle-card" style="max-width:300px;text-align:center;">
+      <img id="qrImage" src="" alt="QR code" style="width:100%;border-radius:6px;display:none;">
+      <div class="placeholder-note" id="qrPlaceholder">Type something above to generate a QR code.</div>
+    </div>
+  </main>
+</div>
+
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
@@ -1213,7 +1325,9 @@
     games: "Game Hub", snake: "Snake", game2048: "2048", puzzle15: "15 Puzzle", reaction: "Reaction Test",
     tictactoe: "Tic-Tac-Toe", wordchain: "Word Chain",
     excuse: "Excuse Generator", whichx: "Which X Are You?", wheel: "Decision Wheel",
-    calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds"
+    calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds",
+    utilities: "Utilities Hub", password: "Password Generator", counter: "Word Counter",
+    countdown: "Countdown Timer", qrcode: "QR Code Generator"
   };
   const NAV_TOGGLE = {
     welcome: { label: 'Home', target: 'home' },
@@ -1232,11 +1346,16 @@
     wordchain: { label: 'Game Hub', target: 'games' },
     excuse: { label: 'Entertainment Hub', target: 'entertainment' },
     whichx: { label: 'Entertainment Hub', target: 'entertainment' },
-    wheel: { label: 'Entertainment Hub', target: 'entertainment' },
-    calc: { label: 'Study Hub', target: 'study' },
     formulas: { label: 'Study Hub', target: 'study' },
     vocab: { label: 'Study Hub', target: 'study' },
-    ambient: { label: 'Study Hub', target: 'study' }
+    ambient: { label: 'Study Hub', target: 'study' },
+    utilities: { label: 'Home', target: 'home' },
+    calc: { label: 'Utilities Hub', target: 'utilities' },
+    wheel: { label: 'Utilities Hub', target: 'utilities' },
+    password: { label: 'Utilities Hub', target: 'utilities' },
+    counter: { label: 'Utilities Hub', target: 'utilities' },
+    countdown: { label: 'Utilities Hub', target: 'utilities' },
+    qrcode: { label: 'Utilities Hub', target: 'utilities' }
   };
 
   /* ---- Shared count-up animation ---- */
@@ -1270,12 +1389,14 @@
   }
 
   const SCROLL_ACCENTS = {
-    study: 'var(--accent-orange)', timer: 'var(--accent-orange)', calc: 'var(--accent-orange)',
+    study: 'var(--accent-orange)', timer: 'var(--accent-orange)',
     formulas: 'var(--accent-orange)', vocab: 'var(--accent-orange)', ambient: 'var(--accent-orange)',
     entertainment: 'var(--accent-violet)', riddles: 'var(--accent-violet)', excuse: 'var(--accent-violet)',
-    whichx: 'var(--accent-violet)', wheel: 'var(--accent-violet)',
+    whichx: 'var(--accent-violet)',
     games: 'var(--accent-teal)', snake: 'var(--accent-teal)', game2048: 'var(--accent-teal)',
-    puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)'
+    puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)',
+    utilities: 'var(--accent-blue)', calc: 'var(--accent-blue)', wheel: 'var(--accent-blue)',
+    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)'
   };
 
   function switchView(view){
@@ -1433,7 +1554,8 @@
     wordchain: 'Word Chain',
     excuse: 'Excuse Generator',
     whichx: 'Which X Are You?',
-    wheel: 'Decision Wheel'
+    wheel: 'Decision Wheel',
+    utilities: 'Utilities Hub'
   };
 
   function typeTitle(view){
@@ -2602,6 +2724,165 @@
   }
 
   renderWheelOptions();
+
+  /* ---- Password Generator ---- */
+  function generatePassword(){
+    const length = parseInt(document.getElementById('passwordLength').value);
+    const useUpper = document.getElementById('passUpper').checked;
+    const useLower = document.getElementById('passLower').checked;
+    const useNumbers = document.getElementById('passNumbers').checked;
+    const useSymbols = document.getElementById('passSymbols').checked;
+
+    const sets = {
+      upper: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+      lower: 'abcdefghijklmnopqrstuvwxyz',
+      numbers: '0123456789',
+      symbols: '!@#$%^&*()-_=+[]{}'
+    };
+
+    let charset = '';
+    if(useUpper) charset += sets.upper;
+    if(useLower) charset += sets.lower;
+    if(useNumbers) charset += sets.numbers;
+    if(useSymbols) charset += sets.symbols;
+
+    const feedback = document.getElementById('passwordFeedback');
+    if(!charset){
+      feedback.textContent = 'Pick at least one character type.';
+      return;
+    }
+    feedback.textContent = '';
+
+    const randomValues = new Uint32Array(length);
+    crypto.getRandomValues(randomValues);
+    let result = '';
+    for(let i = 0; i < length; i++){
+      result += charset[randomValues[i] % charset.length];
+    }
+    document.getElementById('passwordOutput').textContent = result;
+  }
+
+  function copyPassword(){
+    const text = document.getElementById('passwordOutput').textContent;
+    const feedback = document.getElementById('passwordFeedback');
+    if(!text || text === 'Click Generate below'){
+      feedback.textContent = 'Generate a password first.';
+      return;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      feedback.textContent = 'Copied to clipboard.';
+      setTimeout(() => { feedback.textContent = ''; }, 2000);
+    }).catch(() => {
+      feedback.textContent = "Couldn't copy — select and copy manually.";
+    });
+  }
+
+  /* ---- Word Counter ---- */
+  function updateCounter(){
+    const text = document.getElementById('counterInput').value;
+    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    const chars = text.length;
+    const charsNoSpace = text.replace(/\s/g, '').length;
+    const sentences = (text.match(/[.!?]+/g) || []).length;
+    const readSeconds = Math.round((words / 200) * 60); // ~200 wpm average reading speed
+
+    animateNumber(document.getElementById('counterWords'), words, { duration: 250 });
+    animateNumber(document.getElementById('counterChars'), chars, { duration: 250 });
+    animateNumber(document.getElementById('counterCharsNoSpace'), charsNoSpace, { duration: 250 });
+    animateNumber(document.getElementById('counterSentences'), sentences, { duration: 250 });
+    document.getElementById('counterReadTime').textContent = readSeconds < 60
+      ? readSeconds + 's'
+      : Math.floor(readSeconds / 60) + 'm ' + (readSeconds % 60) + 's';
+  }
+
+  /* ---- Countdown Timer ---- */
+  let countdowns = [];
+
+  async function loadCountdowns(){
+    try{
+      const res = await window.storage.get('countdowns', false);
+      countdowns = res && res.value ? JSON.parse(res.value) : [];
+    }catch(e){ countdowns = []; }
+    renderCountdowns();
+  }
+
+  async function saveCountdowns(){
+    try{ await window.storage.set('countdowns', JSON.stringify(countdowns), false); }catch(e){}
+  }
+
+  function addCountdown(){
+    const labelInput = document.getElementById('countdownLabel');
+    const dateInput = document.getElementById('countdownDate');
+    const label = labelInput.value.trim();
+    const date = dateInput.value;
+    if(!label || !date) return;
+    countdowns.push({ label, date });
+    labelInput.value = '';
+    dateInput.value = '';
+    saveCountdowns();
+    renderCountdowns();
+  }
+
+  function removeCountdown(i){
+    countdowns.splice(i, 1);
+    saveCountdowns();
+    renderCountdowns();
+  }
+
+  function renderCountdowns(){
+    const grid = document.getElementById('countdownGrid');
+    if(!grid) return;
+    if(countdowns.length === 0){
+      grid.innerHTML = '<div class="placeholder-note">No countdowns yet — add one above.</div>';
+      return;
+    }
+    grid.innerHTML = countdowns.map((c, i) => `
+      <div class="sound-card">
+        <div class="sound-card-top">
+          <div class="sound-card-title">${escapeHtml(c.label)}</div>
+          <div class="task-del" onclick="removeCountdown(${i})">&times;</div>
+        </div>
+        <div class="cs-value" id="countdownVal-${i}" style="font-size:20px;">--</div>
+        <div class="cs-label" style="margin-top:6px;">${new Date(c.date).toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'})}</div>
+      </div>
+    `).join('');
+    updateCountdownValues();
+  }
+
+  function updateCountdownValues(){
+    const view = document.getElementById('view-countdown');
+    if(!view || !view.classList.contains('visible')) return;
+    countdowns.forEach((c, i) => {
+      const el = document.getElementById('countdownVal-' + i);
+      if(!el) return;
+      const diff = new Date(c.date + 'T00:00:00') - new Date();
+      if(diff <= 0){
+        el.textContent = 'Today!';
+        return;
+      }
+      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+      el.textContent = `${days}d ${hours}h`;
+    });
+  }
+
+  setInterval(updateCountdownValues, 60000);
+  loadCountdowns();
+
+  /* ---- QR Code Generator ---- */
+  function updateQR(){
+    const text = document.getElementById('qrInput').value.trim();
+    const img = document.getElementById('qrImage');
+    const placeholder = document.getElementById('qrPlaceholder');
+    if(!text){
+      img.style.display = 'none';
+      placeholder.style.display = 'block';
+      return;
+    }
+    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(text)}`;
+    img.style.display = 'block';
+    placeholder.style.display = 'none';
+  }
 
   /* ---- Quick Calculator ---- */
   let calcExpr = '';
