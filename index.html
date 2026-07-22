@@ -2373,7 +2373,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gemini-2.5-flash-lite",
+        model: "gemini-3.1-flash-lite",
         contents: [{ role: "user", parts: [{ text: prompt }] }]
       })
     });
@@ -2388,7 +2388,7 @@
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }]
     }));
-    const body = { model: "gemini-2.5-flash-lite", contents };
+    const body = { model: "gemini-3.1-flash-lite", contents };
     if(systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
     const response = await fetch(GEMINI_PROXY_URL, {
