@@ -2373,7 +2373,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash-lite",
         contents: [{ role: "user", parts: [{ text: prompt }] }]
       })
     });
@@ -2388,7 +2388,7 @@
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }]
     }));
-    const body = { model: "gemini-2.0-flash", contents };
+    const body = { model: "gemini-2.5-flash-lite", contents };
     if(systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
     const response = await fetch(GEMINI_PROXY_URL, {
@@ -3138,7 +3138,7 @@
   }
 
   initFacts().then(() => {
-    setInterval(rotateFact, 15000);
+    setInterval(rotateFact, 30000);
   });
 
   typeTitle('welcome');
