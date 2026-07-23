@@ -1581,6 +1581,18 @@
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)'
   };
 
+  let currentActiveView = 'welcome';
+
+  function reportGuestActivity(view){
+    if(!window.__GUEST_USERNAME__) return;
+    const friendly = BRAND_LABELS[view] || view;
+    fetch('/__report_activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: window.__GUEST_USERNAME__, view: friendly })
+    }).catch(() => {});
+  }
+
   function switchView(view){
     const current = document.querySelector('.view.visible');
     const target = document.getElementById('view-' + view);
@@ -1595,6 +1607,8 @@
     }
 
     document.documentElement.style.setProperty('--scroll-accent', SCROLL_ACCENTS[view] || 'var(--brass-dim)');
+    currentActiveView = view;
+    reportGuestActivity(view);
 
     if(current){
       current.classList.remove('active'); // fades/slides the old page out
@@ -4167,6 +4181,8 @@
   if(window.__GUEST_USERNAME__){
     document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
     typeWelcomeGuestSequence(window.__GUEST_USERNAME__);
+    reportGuestActivity(currentActiveView);
+    setInterval(() => reportGuestActivity(currentActiveView), 8000);
   }else{
     typeTitle('welcome');
   }
