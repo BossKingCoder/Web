@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en-GB">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -64,7 +64,14 @@
     letter-spacing:.05em;
   }
 
-  .nav-links{display:flex;gap:28px;}
+  .nav-links{display:flex;gap:28px;align-items:center;}
+  .nav-pin-badge{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--brass-soft);
+    background:var(--panel);border:1px solid var(--line);border-radius:20px;
+    padding:6px 14px;white-space:nowrap;cursor:pointer;
+    transition:border-color .15s ease;
+  }
+  .nav-pin-badge:hover{border-color:var(--brass-dim);}
 
   /* ---- Global search ---- */
   .nav-search-wrap{position:relative;flex:1;max-width:360px;margin:0 24px;}
@@ -299,6 +306,9 @@
   .hub-card:nth-child(4){animation-delay:0.50s;}
   .hub-card:nth-child(5){animation-delay:0.64s;}
   .hub-card:nth-child(6){animation-delay:0.78s;}
+  .hub-card:nth-child(7){animation-delay:0.92s;}
+  .hub-card:nth-child(8){animation-delay:1.06s;}
+  .hub-card:nth-child(9){animation-delay:1.20s;}
   @keyframes hubCardIn{
     from{opacity:0;transform:translateY(14px);}
     to{opacity:1;transform:translateY(0);}
@@ -443,6 +453,22 @@
   }
   .quick-add button:hover{background:var(--brass-soft);}
 
+  /* ---- Countdown date row (explicit day/month/year, no native date picker) ---- */
+  .countdown-date-row{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;}
+  .countdown-date-row select, .countdown-date-row input{
+    background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 12px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .countdown-date-row select:focus, .countdown-date-row input:focus{outline:none;border-color:var(--brass);}
+  .countdown-date-row select#countdownDay{width:76px;flex-shrink:0;}
+  .countdown-date-row select#countdownMonth{flex:1;min-width:120px;}
+  .countdown-date-row input#countdownYear{width:100px;flex-shrink:0;}
+  .countdown-date-row button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 18px;
+    border-radius:6px;font-weight:600;cursor:pointer;font-size:14px;flex-shrink:0;
+  }
+  .countdown-date-row button:hover{background:var(--brass-soft);}
+
   /* ---- Small stat boxes (used by Reaction Test) ---- */
   .clicker-stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
   .cs-label{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;}
@@ -579,7 +605,7 @@
     border-radius:8px;
   }
   .game-overlay-text{font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F5F1E8;letter-spacing:.03em;text-align:center;padding:0 20px;}
-  #snakeCanvas{background:var(--panel);border:1px solid var(--line);border-radius:8px;display:block;}
+  #snakeCanvas{background:var(--panel);border:1px solid var(--line);border-radius:8px;display:block;max-width:100%;height:auto;}
 
   .grid-2048{
     display:grid;grid-template-columns:repeat(4, 76px);grid-template-rows:repeat(4, 76px);
@@ -674,6 +700,7 @@
     nav{padding:14px 22px;}
     .nav-links{gap:16px;}
     .nav-search-wrap{display:none;}
+    .nav-pin-badge{display:none !important;}
     .brand-name{font-size:17px;}
     .hero{padding:70px 22px 80px 22px;}
     .hero h1{font-size:40px;}
@@ -682,6 +709,20 @@
     .widget{min-width:140px;padding:12px 16px;}
     .widget-main{font-size:22px;}
     main{padding:40px 22px;}
+
+    /* Headers with a badge/buttons alongside the title need to wrap, not overflow */
+    .chat-head{flex-wrap:wrap;}
+    .riddle-buttons{flex-wrap:wrap;}
+
+    /* Fixed-cell game grids shrink to fit narrow screens instead of overflowing */
+    .calc-grid{grid-template-columns:repeat(4, minmax(0, 1fr));max-width:100%;}
+    .calc-display{max-width:100%;}
+    .grid-2048{grid-template-columns:repeat(4, minmax(0, 1fr));}
+    .grid-puzzle15{grid-template-columns:repeat(4, minmax(0, 1fr));}
+    .grid-ttt{grid-template-columns:repeat(3, minmax(0, 1fr));}
+    .tile-2048{font-size:20px;}
+    .tile-puzzle15{font-size:18px;}
+    .tile-ttt{font-size:34px;}
   }
 </style>
 </head>
@@ -694,6 +735,7 @@
     <div class="nav-search-results" id="globalSearchResults"></div>
   </div>
   <div class="nav-links">
+    <div class="nav-pin-badge" id="navPinBadge" style="display:none;" onclick="switchView('countdown')"></div>
     <div class="nav-link active" id="navToggle" onclick="switchView('home')">Home</div>
   </div>
 </nav>
@@ -1304,7 +1346,11 @@
     </div>
     <div class="quick-add">
       <input id="countdownLabel" placeholder="What's it counting down to? (e.g. Exam, Birthday)">
-      <input type="date" id="countdownDate" style="flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;">
+    </div>
+    <div class="countdown-date-row">
+      <select id="countdownDay"></select>
+      <select id="countdownMonth"></select>
+      <input type="number" id="countdownYear" placeholder="Year" min="1900" max="2999">
       <button onclick="addCountdown()">Add</button>
     </div>
     <div class="sound-grid" id="countdownGrid"></div>
@@ -2939,21 +2985,35 @@
       countdowns = res && res.value ? JSON.parse(res.value) : [];
     }catch(e){ countdowns = []; }
     renderCountdowns();
+    updateNavPin();
   }
 
   async function saveCountdowns(){
     try{ await window.storage.set('countdowns', JSON.stringify(countdowns), false); }catch(e){}
   }
 
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  function populateCountdownInputs(){
+    const daySelect = document.getElementById('countdownDay');
+    const monthSelect = document.getElementById('countdownMonth');
+    if(!daySelect || !monthSelect) return;
+    daySelect.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i+1}">${i+1}</option>`).join('');
+    monthSelect.innerHTML = MONTH_NAMES.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+  }
+
   function addCountdown(){
     const labelInput = document.getElementById('countdownLabel');
-    const dateInput = document.getElementById('countdownDate');
+    const day = document.getElementById('countdownDay').value;
+    const month = document.getElementById('countdownMonth').value;
+    const year = document.getElementById('countdownYear').value;
     const label = labelInput.value.trim();
-    const date = dateInput.value;
-    if(!label || !date) return;
-    countdowns.push({ label, date });
+    if(!label || !day || !month || !year) return;
+
+    const date = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    countdowns.push({ label, date, pinned: false });
     labelInput.value = '';
-    dateInput.value = '';
+    document.getElementById('countdownYear').value = '';
     saveCountdowns();
     renderCountdowns();
   }
@@ -2962,6 +3022,32 @@
     countdowns.splice(i, 1);
     saveCountdowns();
     renderCountdowns();
+    updateNavPin();
+  }
+
+  function togglePinCountdown(i){
+    const wasPinned = countdowns[i].pinned;
+    countdowns.forEach(c => { c.pinned = false; }); // only one pin at a time
+    countdowns[i].pinned = !wasPinned;
+    saveCountdowns();
+    renderCountdowns();
+    updateNavPin();
+  }
+
+  function formatDateDDMMYYYY(dateStr){
+    const d = new Date(dateStr + 'T00:00:00');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    return `${dd}/${mm}/${d.getFullYear()}`;
+  }
+
+  function formatCountdownDiff(diff){
+    if(diff <= 0) return 'Today!';
+    const days = Math.floor(diff / 86400000);
+    const hours = Math.floor((diff / 3600000) % 24);
+    const minutes = Math.floor((diff / 60000) % 60);
+    const seconds = Math.floor((diff / 1000) % 60);
+    return `${days}d ${hours}h ${minutes}m ${seconds}s`;
   }
 
   function renderCountdowns(){
@@ -2975,10 +3061,13 @@
       <div class="sound-card">
         <div class="sound-card-top">
           <div class="sound-card-title">${escapeHtml(c.label)}</div>
-          <div class="task-del" onclick="removeCountdown(${i})">&times;</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div class="task-del" onclick="togglePinCountdown(${i})" title="${c.pinned ? 'Unpin' : 'Pin to header'}" style="color:${c.pinned ? 'var(--accent-blue)' : 'var(--slate-dim)'};font-size:15px;">📌</div>
+            <div class="task-del" onclick="removeCountdown(${i})">&times;</div>
+          </div>
         </div>
-        <div class="cs-value" id="countdownVal-${i}" style="font-size:20px;">--</div>
-        <div class="cs-label" style="margin-top:6px;">${new Date(c.date).toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'})}</div>
+        <div class="cs-value" id="countdownVal-${i}" style="font-size:18px;">--</div>
+        <div class="cs-label" style="margin-top:6px;">${formatDateDDMMYYYY(c.date)}</div>
       </div>
     `).join('');
     updateCountdownValues();
@@ -2991,17 +3080,28 @@
       const el = document.getElementById('countdownVal-' + i);
       if(!el) return;
       const diff = new Date(c.date + 'T00:00:00') - new Date();
-      if(diff <= 0){
-        el.textContent = 'Today!';
-        return;
-      }
-      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-      const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
-      el.textContent = `${days}d ${hours}h`;
+      el.textContent = formatCountdownDiff(diff);
     });
   }
 
-  setInterval(updateCountdownValues, 60000);
+  function updateNavPin(){
+    const badge = document.getElementById('navPinBadge');
+    if(!badge) return;
+    const pinned = countdowns.find(c => c.pinned);
+    if(!pinned){
+      badge.style.display = 'none';
+      return;
+    }
+    badge.style.display = 'inline-flex';
+    const diff = new Date(pinned.date + 'T00:00:00') - new Date();
+    badge.innerHTML = `📌 ${escapeHtml(pinned.label)}: ${formatCountdownDiff(diff)}`;
+  }
+
+  setInterval(() => {
+    updateCountdownValues();
+    updateNavPin();
+  }, 1000);
+  populateCountdownInputs();
   loadCountdowns();
 
   /* ---- QR Code Generator ---- */
