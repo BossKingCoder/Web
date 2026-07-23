@@ -209,6 +209,7 @@
     animation:blink 1.1s steps(1) infinite;
   }
   .cursor.small{width:6px;height:24px;vertical-align:-4px;margin-left:5px;}
+  .cursor.cursor-paused{animation:none;opacity:1;}
 
   .count-pop{
     display:inline-block;
@@ -736,6 +737,7 @@
   </div>
   <div class="nav-links">
     <div class="nav-pin-badge" id="navPinBadge" style="display:none;" onclick="switchView('countdown')"></div>
+    <a class="nav-link" href="/admin" style="text-decoration:none;">Admin</a>
     <div class="nav-link active" id="navToggle" onclick="switchView('home')">Home</div>
   </div>
 </nav>
@@ -746,7 +748,7 @@
       <div class="hero-eyebrow"><span class="rule"></span>Personal workspace</div>
       <h1 id="title-welcome"><span class="title-text"></span><span class="cursor"></span></h1>
       <div class="sub">This is your space — built for whatever you decide to put here next.</div>
-      <div class="status-line"><span class="status-dot"></span>System Ready</div>
+      <div class="status-line"><span class="status-dot"></span><span id="statusText">System Ready</span></div>
 
       <div class="widget-row">
         <div class="widget" id="clockWidget">
@@ -1754,6 +1756,55 @@
       i++;
       if(i >= text.length) clearInterval(span._typeInterval);
     }, 35);
+  }
+
+  /* ---- Guest welcome sequence: types the owner's name, then "corrects" it to the guest's username ---- */
+  function typeCharsInto(span, text, speed){
+    return new Promise(resolve => {
+      let i = 0;
+      const interval = setInterval(() => {
+        span.textContent += text[i];
+        i++;
+        if(i >= text.length){ clearInterval(interval); resolve(); }
+      }, speed);
+    });
+  }
+
+  function backspaceChars(span, count, speed){
+    return new Promise(resolve => {
+      let removed = 0;
+      const interval = setInterval(() => {
+        span.textContent = span.textContent.slice(0, -1);
+        removed++;
+        if(removed >= count){ clearInterval(interval); resolve(); }
+      }, speed);
+    });
+  }
+
+  function wait(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function typeWelcomeGuestSequence(username){
+    const container = document.getElementById('title-welcome');
+    if(!container) return;
+    const span = container.querySelector('.title-text');
+    const cursorEl = container.querySelector('.cursor');
+    if(!span) return;
+
+    const fullText = TITLE_TEXTS.welcome; // "Welcome back, Shaurya Kshitij"
+    const namePart = 'Shaurya Kshitij';
+
+    span.textContent = '';
+    await typeCharsInto(span, fullText, 35);
+
+    if(cursorEl) cursorEl.classList.add('cursor-paused');
+    await wait(1000);
+
+    await backspaceChars(span, namePart.length, 40);
+
+    if(cursorEl) cursorEl.classList.remove('cursor-paused');
+    await typeCharsInto(span, username, 35);
   }
 
   /* ---- AI chat ---- */
@@ -4113,7 +4164,12 @@
     setInterval(rotateFact, 30000);
   });
 
-  typeTitle('welcome');
+  if(window.__GUEST_USERNAME__){
+    document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
+    typeWelcomeGuestSequence(window.__GUEST_USERNAME__);
+  }else{
+    typeTitle('welcome');
+  }
 </script>
 
 </body>
