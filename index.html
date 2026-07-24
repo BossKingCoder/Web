@@ -464,6 +464,9 @@
   .countdown-date-row select#countdownDay{width:76px;flex-shrink:0;}
   .countdown-date-row select#countdownMonth{flex:1;min-width:120px;}
   .countdown-date-row input#countdownYear{width:100px;flex-shrink:0;}
+  .countdown-date-row select#capsuleDay{width:76px;flex-shrink:0;}
+  .countdown-date-row select#capsuleMonth{flex:1;min-width:120px;}
+  .countdown-date-row input#capsuleYear{width:100px;flex-shrink:0;}
   .countdown-date-row button{
     background:var(--brass);color:var(--ink);border:none;padding:0 18px;
     border-radius:6px;font-weight:600;cursor:pointer;font-size:14px;flex-shrink:0;
@@ -1044,6 +1047,10 @@
         <div class="hub-card-title">Anonymous Messenger</div>
         <div class="hub-card-desc">Send an anonymous email to anyone — no sign-off, no trace back to you.</div>
       </div>
+      <div class="hub-card" onclick="switchView('timecapsule')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg></div>
+        <div class="hub-card-title">Time Capsule</div>
+        <div class="hub-card-desc">Write a message, seal it to a future date — delivered by email, not stored on the site.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -1397,6 +1404,26 @@
   </main>
 </div>
 
+<div class="view" id="view-timecapsule">
+  <main>
+    <div class="view-head">
+      <h2>Time Capsule</h2>
+      <div class="view-sub">Sealed and sent by email on the date you choose — not stored or viewable on the site, so revoking access later won't affect it.</div>
+    </div>
+    <div class="quick-add">
+      <input id="capsuleEmail" type="email" placeholder="Deliver to: email@example.com">
+    </div>
+    <textarea id="capsuleMessage" placeholder="Write your message to the future here..." style="width:100%;min-height:180px;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:16px;border-radius:8px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;resize:vertical;margin-bottom:16px;"></textarea>
+    <div class="countdown-date-row">
+      <select id="capsuleDay"></select>
+      <select id="capsuleMonth"></select>
+      <input type="number" id="capsuleYear" placeholder="Year" min="1900" max="2999">
+      <button onclick="sealTimeCapsule()" id="capsuleSendBtn">Seal Time Capsule</button>
+    </div>
+    <div class="riddle-feedback" id="capsuleFeedback"></div>
+  </main>
+</div>
+
 <div class="view" id="view-challenges">
   <main>
     <div class="view-head">
@@ -1520,7 +1547,7 @@
     excuse: "Excuse Generator", whichx: "Which X Are You?", wheel: "Decision Wheel",
     calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds",
     utilities: "Utilities Hub", password: "Password Generator", counter: "Word Counter",
-    countdown: "Countdown Timer", qrcode: "QR Code Generator", anonmail: "Anonymous Messenger",
+    countdown: "Countdown Timer", qrcode: "QR Code Generator", anonmail: "Anonymous Messenger", timecapsule: "Time Capsule",
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
     dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle"
   };
@@ -1552,6 +1579,7 @@
     countdown: { label: 'Utilities Hub', target: 'utilities' },
     qrcode: { label: 'Utilities Hub', target: 'utilities' },
     anonmail: { label: 'Utilities Hub', target: 'utilities' },
+    timecapsule: { label: 'Utilities Hub', target: 'utilities' },
     challenges: { label: 'Home', target: 'home' },
     dailytrivia: { label: 'Challenges Hub', target: 'challenges' },
     dailytyping: { label: 'Challenges Hub', target: 'challenges' },
@@ -1599,7 +1627,7 @@
     games: 'var(--accent-teal)', snake: 'var(--accent-teal)', game2048: 'var(--accent-teal)',
     puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)',
     utilities: 'var(--accent-blue)', calc: 'var(--accent-blue)', wheel: 'var(--accent-blue)',
-    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', anonmail: 'var(--accent-blue)',
+    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', anonmail: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)'
   };
@@ -1623,7 +1651,7 @@
     entertainment: 'entertainment', riddles: 'entertainment', excuse: 'entertainment', whichx: 'entertainment',
     games: 'games', snake: 'games', game2048: 'games', puzzle15: 'games', reaction: 'games', tictactoe: 'games', wordchain: 'games',
     utilities: 'utilities', calc: 'utilities', wheel: 'utilities', password: 'utilities', counter: 'utilities',
-    countdown: 'utilities', qrcode: 'utilities', anonmail: 'utilities',
+    countdown: 'utilities', qrcode: 'utilities', anonmail: 'utilities', timecapsule: 'utilities',
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
     dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges'
   };
@@ -3268,6 +3296,63 @@
       }
     }catch(e){
       feedback.textContent = 'Something went wrong sending the message.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+    btn.disabled = false;
+  }
+
+  /* ---- Time Capsule ---- */
+  const CAPSULE_MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  function populateCapsuleInputs(){
+    const daySelect = document.getElementById('capsuleDay');
+    const monthSelect = document.getElementById('capsuleMonth');
+    if(!daySelect || !monthSelect) return;
+    daySelect.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i+1}">${i+1}</option>`).join('');
+    monthSelect.innerHTML = CAPSULE_MONTH_NAMES.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+  }
+  populateCapsuleInputs();
+
+  async function sealTimeCapsule(){
+    const email = document.getElementById('capsuleEmail').value.trim();
+    const message = document.getElementById('capsuleMessage').value.trim();
+    const day = document.getElementById('capsuleDay').value;
+    const month = document.getElementById('capsuleMonth').value;
+    const year = document.getElementById('capsuleYear').value;
+    const feedback = document.getElementById('capsuleFeedback');
+    const btn = document.getElementById('capsuleSendBtn');
+
+    feedback.textContent = '';
+    feedback.className = 'riddle-feedback';
+
+    if(!email || !message || !day || !month || !year){
+      feedback.textContent = 'Fill in the email, message, and a full date first.';
+      feedback.className = 'riddle-feedback incorrect';
+      return;
+    }
+
+    btn.disabled = true;
+    feedback.textContent = 'Sealing...';
+
+    try{
+      const response = await fetch('/__create_time_capsule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, message, day, month, year })
+      });
+      const data = await response.json();
+      if(data.ok){
+        feedback.textContent = 'Sealed — this will be emailed on the date you chose.';
+        feedback.className = 'riddle-feedback correct answered';
+        document.getElementById('capsuleEmail').value = '';
+        document.getElementById('capsuleMessage').value = '';
+        document.getElementById('capsuleYear').value = '';
+      }else{
+        feedback.textContent = data.error || "Couldn't seal it — try again.";
+        feedback.className = 'riddle-feedback incorrect';
+      }
+    }catch(e){
+      feedback.textContent = 'Something went wrong sealing the capsule.';
       feedback.className = 'riddle-feedback incorrect';
     }
     btn.disabled = false;
