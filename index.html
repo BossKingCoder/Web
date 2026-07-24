@@ -1043,10 +1043,6 @@
         <div class="hub-card-title">QR Code Generator</div>
         <div class="hub-card-desc">Turn any text or link into a scannable QR code.</div>
       </div>
-      <div class="hub-card" onclick="switchView('anonmail')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg></div>
-        <div class="hub-card-title">Anonymous Messenger</div>
-        <div class="hub-card-desc">Send an anonymous email to anyone — no sign-off, no trace back to you.</div>
-      </div>
       <div class="hub-card" onclick="switchView('timecapsule')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg></div>
         <div class="hub-card-title">Time Capsule</div>
         <div class="hub-card-desc">Write a message, seal it to a future date — delivered by email, not stored on the site.</div>
@@ -1386,24 +1382,6 @@
   </main>
 </div>
 
-<div class="view" id="view-anonmail">
-  <main>
-    <div class="view-head">
-      <h2>Anonymous Messenger</h2>
-      <div class="view-sub">Always sent anonymously — no name, no reply-to, no trace back to you.</div>
-    </div>
-    <div class="quick-add">
-      <input id="anonTo" type="email" placeholder="To: recipient@email.com">
-    </div>
-    <div class="quick-add">
-      <input id="anonSubject" type="text" placeholder="Subject">
-    </div>
-    <textarea id="anonMessage" placeholder="Write your message here..." style="width:100%;min-height:180px;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:16px;border-radius:8px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;resize:vertical;margin-bottom:16px;"></textarea>
-    <button class="timer-btn primary" onclick="sendAnonymousEmail()" id="anonSendBtn">Send Anonymously</button>
-    <div class="riddle-feedback" id="anonFeedback" style="margin-top:10px;"></div>
-  </main>
-</div>
-
 <div class="view" id="view-timecapsule">
   <main>
     <div class="view-head">
@@ -1547,7 +1525,7 @@
     excuse: "Excuse Generator", whichx: "Which X Are You?", wheel: "Decision Wheel",
     calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds",
     utilities: "Utilities Hub", password: "Password Generator", counter: "Word Counter",
-    countdown: "Countdown Timer", qrcode: "QR Code Generator", anonmail: "Anonymous Messenger", timecapsule: "Time Capsule",
+    countdown: "Countdown Timer", qrcode: "QR Code Generator", timecapsule: "Time Capsule",
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
     dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle"
   };
@@ -1578,7 +1556,6 @@
     counter: { label: 'Utilities Hub', target: 'utilities' },
     countdown: { label: 'Utilities Hub', target: 'utilities' },
     qrcode: { label: 'Utilities Hub', target: 'utilities' },
-    anonmail: { label: 'Utilities Hub', target: 'utilities' },
     timecapsule: { label: 'Utilities Hub', target: 'utilities' },
     challenges: { label: 'Home', target: 'home' },
     dailytrivia: { label: 'Challenges Hub', target: 'challenges' },
@@ -1627,7 +1604,7 @@
     games: 'var(--accent-teal)', snake: 'var(--accent-teal)', game2048: 'var(--accent-teal)',
     puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)',
     utilities: 'var(--accent-blue)', calc: 'var(--accent-blue)', wheel: 'var(--accent-blue)',
-    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', anonmail: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
+    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)'
   };
@@ -1651,7 +1628,7 @@
     entertainment: 'entertainment', riddles: 'entertainment', excuse: 'entertainment', whichx: 'entertainment',
     games: 'games', snake: 'games', game2048: 'games', puzzle15: 'games', reaction: 'games', tictactoe: 'games', wordchain: 'games',
     utilities: 'utilities', calc: 'utilities', wheel: 'utilities', password: 'utilities', counter: 'utilities',
-    countdown: 'utilities', qrcode: 'utilities', anonmail: 'utilities', timecapsule: 'utilities',
+    countdown: 'utilities', qrcode: 'utilities', timecapsule: 'utilities',
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
     dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges'
   };
@@ -3255,50 +3232,6 @@
     img.src = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(text)}`;
     img.style.display = 'block';
     placeholder.style.display = 'none';
-  }
-
-  /* ---- Anonymous Messenger ---- */
-  async function sendAnonymousEmail(){
-    const to = document.getElementById('anonTo').value.trim();
-    const subject = document.getElementById('anonSubject').value.trim();
-    const message = document.getElementById('anonMessage').value.trim();
-    const feedback = document.getElementById('anonFeedback');
-    const btn = document.getElementById('anonSendBtn');
-
-    feedback.textContent = '';
-    feedback.className = 'riddle-feedback';
-
-    if(!to || !subject || !message){
-      feedback.textContent = 'Fill in To, Subject, and a message first.';
-      feedback.className = 'riddle-feedback incorrect';
-      return;
-    }
-
-    btn.disabled = true;
-    feedback.textContent = 'Sending...';
-
-    try{
-      const response = await fetch('/__send_anonymous_email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to, subject, message })
-      });
-      const data = await response.json();
-      if(data.ok){
-        feedback.textContent = 'Sent anonymously.';
-        feedback.className = 'riddle-feedback correct answered';
-        document.getElementById('anonTo').value = '';
-        document.getElementById('anonSubject').value = '';
-        document.getElementById('anonMessage').value = '';
-      }else{
-        feedback.textContent = data.error || "Couldn't send — try again.";
-        feedback.className = 'riddle-feedback incorrect';
-      }
-    }catch(e){
-      feedback.textContent = 'Something went wrong sending the message.';
-      feedback.className = 'riddle-feedback incorrect';
-    }
-    btn.disabled = false;
   }
 
   /* ---- Time Capsule ---- */
