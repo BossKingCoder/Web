@@ -1555,6 +1555,10 @@
         <div class="hub-card-title">Live Chat</div>
         <div class="hub-card-desc">Talk with anyone else on the site right now — instant, not refreshed.</div>
       </div>
+      <div class="hub-card" onclick="openDirectMessages()"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7 14.7L4 21l3.3-1a9 9 0 1 0 4.7-17z"/></svg></div>
+        <div class="hub-card-title">Direct Messages</div>
+        <div class="hub-card-desc">Private, one-to-one with whoever else is online right now.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -1576,6 +1580,29 @@
   </main>
 </div>
 
+<div class="view" id="view-directmessages">
+  <main>
+    <div class="view-head">
+      <h2>Direct Messages</h2>
+      <div class="view-sub" id="dmConnectionStatus">Connecting...</div>
+    </div>
+    <div style="display:flex;gap:20px;flex-wrap:wrap;">
+      <div style="flex:0 0 200px;min-width:180px;">
+        <div class="cs-label" style="margin-bottom:10px;">Online now</div>
+        <div id="dmContactList"></div>
+      </div>
+      <div style="flex:1;min-width:280px;">
+        <div class="cs-label" id="dmConversationHeader" style="margin-bottom:10px;">Pick someone online to start a conversation.</div>
+        <div id="dmConversationLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;"></div>
+        <div class="chat-input-row">
+          <textarea id="dmInput" placeholder="Type a direct message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDirectMessage();}"></textarea>
+          <button id="dmSendBtn" onclick="sendDirectMessage()">Send</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
@@ -1589,7 +1616,7 @@
     countdown: "Countdown Timer", qrcode: "QR Code Generator", timecapsule: "Time Capsule",
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
     dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle",
-    multiplayer: "Multiplayer Hub", livechat: "Live Chat"
+    multiplayer: "Multiplayer Hub", livechat: "Live Chat", directmessages: "Direct Messages"
   };
   const NAV_TOGGLE = {
     welcome: { label: 'Home', target: 'home' },
@@ -1627,7 +1654,8 @@
     dailymath: { label: 'Challenges Hub', target: 'challenges' },
     dailyemoji: { label: 'Challenges Hub', target: 'challenges' },
     multiplayer: { label: 'Home', target: 'home' },
-    livechat: { label: 'Multiplayer Hub', target: 'multiplayer' }
+    livechat: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    directmessages: { label: 'Multiplayer Hub', target: 'multiplayer' }
   };
 
   /* ---- Shared count-up animation ---- */
@@ -1671,7 +1699,7 @@
     password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)',
-    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)'
+    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)', directmessages: 'var(--accent-pink)'
   };
 
   let currentActiveView = 'welcome';
@@ -1696,7 +1724,7 @@
     countdown: 'utilities', qrcode: 'utilities', timecapsule: 'utilities',
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
     dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges',
-    multiplayer: 'multiplayer', livechat: 'multiplayer'
+    multiplayer: 'multiplayer', livechat: 'multiplayer', directmessages: 'multiplayer'
   };
 
   function isViewAllowed(view){
@@ -3361,35 +3389,48 @@
     btn.disabled = false;
   }
 
-  /* ---- Multiplayer Hub: Live Chat ---- */
+  /* ---- Multiplayer Hub: Live Chat + Direct Messages (share one connection) ---- */
   let liveChatSocket = null;
+  let onlineUsers = [];
+  let dmConversations = {}; // { username: [{from, text, timestamp}, ...] }
+  let activeDmPartner = null;
 
   function getChatDisplayName(){
     return window.__GUEST_USERNAME__ || 'Shaurya';
   }
 
-  function openLiveChat(){
-    switchView('livechat');
+  function ensureChatConnection(){
     if(!liveChatSocket || liveChatSocket.readyState === WebSocket.CLOSED){
       connectLiveChat();
     }
   }
 
+  function openLiveChat(){
+    switchView('livechat');
+    ensureChatConnection();
+  }
+
+  function openDirectMessages(){
+    switchView('directmessages');
+    ensureChatConnection();
+    renderDMContactList();
+  }
+
   function connectLiveChat(){
-    const statusEl = document.getElementById('chatConnectionStatus');
     const myName = getChatDisplayName();
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__chat_ws?username=' + encodeURIComponent(myName);
 
-    if(statusEl) statusEl.textContent = 'Connecting...';
+    setChatStatus('Connecting...');
     liveChatSocket = new WebSocket(wsUrl);
 
     liveChatSocket.addEventListener('open', () => {
-      if(statusEl) statusEl.textContent = 'Connected — live';
+      setChatStatus('Connected — live');
     });
 
     liveChatSocket.addEventListener('message', (event) => {
       let data;
       try{ data = JSON.parse(event.data); }catch(e){ return; }
+
       if(data.type === 'chat'){
         appendLiveChatMessage(data.username, data.text, data.username === myName);
       }else if(data.type === 'system'){
@@ -3397,20 +3438,38 @@
       }else if(data.type === 'presence'){
         const countEl = document.getElementById('chatOnlineCount');
         if(countEl) countEl.textContent = data.count;
+        if(Array.isArray(data.users)){
+          onlineUsers = data.users;
+          renderDMContactList();
+        }
+      }else if(data.type === 'dm'){
+        const partner = data.from === myName ? data.to : data.from;
+        if(!dmConversations[partner]) dmConversations[partner] = [];
+        dmConversations[partner].push({ from: data.from, text: data.text, timestamp: data.timestamp });
+        if(partner === activeDmPartner) renderDMConversation();
       }
     });
 
     liveChatSocket.addEventListener('close', () => {
-      if(statusEl) statusEl.textContent = 'Disconnected — reconnecting...';
+      setChatStatus('Disconnected — reconnecting...');
       setTimeout(() => {
-        const view = document.getElementById('view-livechat');
-        if(view && view.classList.contains('visible')) connectLiveChat();
+        const liveView = document.getElementById('view-livechat');
+        const dmView = document.getElementById('view-directmessages');
+        const stillNeeded = (liveView && liveView.classList.contains('visible')) || (dmView && dmView.classList.contains('visible'));
+        if(stillNeeded) connectLiveChat();
       }, 3000);
     });
 
     liveChatSocket.addEventListener('error', () => {
       if(liveChatSocket) liveChatSocket.close();
     });
+  }
+
+  function setChatStatus(text){
+    const liveStatusEl = document.getElementById('chatConnectionStatus');
+    const dmStatusEl = document.getElementById('dmConnectionStatus');
+    if(liveStatusEl) liveStatusEl.textContent = text;
+    if(dmStatusEl) dmStatusEl.textContent = text;
   }
 
   function appendLiveChatMessage(username, text, isMe){
@@ -3438,6 +3497,55 @@
     const text = input.value.trim();
     if(!text || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
     liveChatSocket.send(JSON.stringify({ type: 'chat', text }));
+    input.value = '';
+  }
+
+  /* ---- Direct Messages ---- */
+  function renderDMContactList(){
+    const container = document.getElementById('dmContactList');
+    if(!container) return;
+    const myName = getChatDisplayName();
+    const others = onlineUsers.filter(u => u !== myName);
+
+    if(others.length === 0){
+      container.innerHTML = '<div class="placeholder-note" style="font-size:12px;padding:12px;">No one else online right now.</div>';
+      return;
+    }
+
+    container.innerHTML = others.map(u => `
+      <div onclick="selectDmPartner('${escapeHtml(u)}')" style="cursor:pointer;padding:9px 12px;border-radius:6px;margin-bottom:6px;
+        background:${u === activeDmPartner ? 'var(--panel-raised)' : 'var(--panel)'};border:1px solid ${u === activeDmPartner ? 'var(--accent-pink)' : 'var(--line)'};
+        font-size:13px;color:#F5F1E8;transition:border-color .2s ease;">
+        ${escapeHtml(u)}
+      </div>
+    `).join('');
+  }
+
+  function selectDmPartner(username){
+    activeDmPartner = username;
+    document.getElementById('dmConversationHeader').textContent = 'Conversation with ' + username;
+    renderDMContactList();
+    renderDMConversation();
+  }
+
+  function renderDMConversation(){
+    const log = document.getElementById('dmConversationLog');
+    if(!log || !activeDmPartner) return;
+    const myName = getChatDisplayName();
+    const messages = dmConversations[activeDmPartner] || [];
+    log.innerHTML = messages.map(m => `
+      <div class="msg ${m.from === myName ? 'user' : 'assistant'}">
+        <div class="who">${escapeHtml(m.from)}</div><div class="body">${escapeHtml(m.text)}</div>
+      </div>
+    `).join('');
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function sendDirectMessage(){
+    const input = document.getElementById('dmInput');
+    const text = input.value.trim();
+    if(!text || !activeDmPartner || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'dm', to: activeDmPartner, text }));
     input.value = '';
   }
 
