@@ -702,6 +702,18 @@
   .tile-ttt.filled{cursor:default;}
   .tile-ttt.filled:hover{background:var(--panel-raised);}
 
+  .grid-connect4{
+    display:grid;grid-template-columns:repeat(7, 50px);grid-template-rows:repeat(6, 50px);
+    gap:6px;background:#1D2C5C;border:1px solid var(--line);border-radius:8px;padding:10px;
+  }
+  .cell-connect4{
+    width:50px;height:50px;border-radius:50%;background:var(--ink);cursor:pointer;
+    transition:background .15s ease;
+  }
+  .cell-connect4:hover{background:var(--panel-raised);}
+  .cell-connect4.red{background:var(--accent-red);cursor:default;}
+  .cell-connect4.yellow{background:var(--brass);cursor:default;}
+
   .chain-display{
     display:flex;flex-wrap:wrap;align-items:center;gap:8px;
     background:var(--panel);border:1px solid var(--line);border-radius:10px;
@@ -753,9 +765,11 @@
     .grid-2048{grid-template-columns:repeat(4, minmax(0, 1fr));}
     .grid-puzzle15{grid-template-columns:repeat(4, minmax(0, 1fr));}
     .grid-ttt{grid-template-columns:repeat(3, minmax(0, 1fr));}
+    .grid-connect4{grid-template-columns:repeat(7, minmax(0, 1fr));}
     .tile-2048{font-size:20px;}
     .tile-puzzle15{font-size:18px;}
     .tile-ttt{font-size:34px;}
+    .cell-connect4{width:auto;height:auto;aspect-ratio:1;}
   }
 </style>
 </head>
@@ -1564,6 +1578,18 @@
         <div class="hub-card-title">Direct Messages</div>
         <div class="hub-card-desc">Private, one-to-one with whoever else is online right now.</div>
       </div>
+      <div class="hub-card" onclick="openLiveTtt()"><div class="hub-icon"><svg viewBox="0 0 24 24"><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg></div>
+        <div class="hub-card-title">Live Tic-Tac-Toe</div>
+        <div class="hub-card-desc">Against an actual person this time — first two online take the game.</div>
+      </div>
+      <div class="hub-card" onclick="openLiveConnect4()"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.5"/><circle cx="12" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="12" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/></svg></div>
+        <div class="hub-card-title">Live Connect 4</div>
+        <div class="hub-card-desc">Drop pieces live against a real opponent.</div>
+      </div>
+      <div class="hub-card" onclick="openWhiteboard()"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 17l4.5-1 9-9-3.5-3.5-9 9L4 17z"/><path d="M13 4.5L16.5 8"/></svg></div>
+        <div class="hub-card-title">Shared Whiteboard</div>
+        <div class="hub-card-desc">Draw together, live — anyone connected sees every stroke.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -1610,6 +1636,49 @@
   </main>
 </div>
 
+<div class="view" id="view-livettt">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Tic-Tac-Toe</h2>
+        <div class="view-sub" id="tttLiveStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendTttReset()">Reset Game</button>
+    </div>
+    <div class="game-stage" id="tttGameStage" style="position:relative;">
+      <div class="grid-ttt" id="gridLiveTtt"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-liveconnect4">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Connect 4</h2>
+        <div class="view-sub" id="connect4LiveStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendConnect4Reset()">Reset Game</button>
+    </div>
+    <div class="game-stage" id="connect4GameStage" style="position:relative;">
+      <div class="grid-connect4" id="gridLiveConnect4"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-whiteboard">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Shared Whiteboard</h2>
+        <div class="view-sub" id="whiteboardStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="clearWhiteboard()">Clear Board</button>
+    </div>
+    <canvas id="whiteboardCanvas" width="700" height="400" style="background:#fff;border-radius:8px;cursor:crosshair;max-width:100%;touch-action:none;"></canvas>
+  </main>
+</div>
+
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
@@ -1623,7 +1692,8 @@
     countdown: "Countdown Timer", qrcode: "QR Code Generator", timecapsule: "Time Capsule",
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
     dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle",
-    multiplayer: "Multiplayer Hub", livechat: "Live Chat", directmessages: "Direct Messages"
+    multiplayer: "Multiplayer Hub", livechat: "Live Chat", directmessages: "Direct Messages",
+    livettt: "Live Tic-Tac-Toe", liveconnect4: "Live Connect 4", whiteboard: "Shared Whiteboard"
   };
   const NAV_TOGGLE = {
     welcome: { label: 'Home', target: 'home' },
@@ -1662,7 +1732,10 @@
     dailyemoji: { label: 'Challenges Hub', target: 'challenges' },
     multiplayer: { label: 'Home', target: 'home' },
     livechat: { label: 'Multiplayer Hub', target: 'multiplayer' },
-    directmessages: { label: 'Multiplayer Hub', target: 'multiplayer' }
+    directmessages: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    livettt: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    liveconnect4: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    whiteboard: { label: 'Multiplayer Hub', target: 'multiplayer' }
   };
 
   /* ---- Shared count-up animation ---- */
@@ -1706,7 +1779,8 @@
     password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)',
-    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)', directmessages: 'var(--accent-pink)'
+    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)', directmessages: 'var(--accent-pink)',
+    livettt: 'var(--accent-pink)', liveconnect4: 'var(--accent-pink)', whiteboard: 'var(--accent-pink)'
   };
 
   let currentActiveView = 'welcome';
@@ -1731,7 +1805,8 @@
     countdown: 'utilities', qrcode: 'utilities', timecapsule: 'utilities',
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
     dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges',
-    multiplayer: 'multiplayer', livechat: 'multiplayer', directmessages: 'multiplayer'
+    multiplayer: 'multiplayer', livechat: 'multiplayer', directmessages: 'multiplayer',
+    livettt: 'multiplayer', liveconnect4: 'multiplayer', whiteboard: 'multiplayer'
   };
 
   function isViewAllowed(view){
@@ -3490,6 +3565,17 @@
           liveChatTypingUsers.delete(data.from);
           updateLiveChatTypingIndicator();
         }
+      }else if(data.type === 'ttt_state'){
+        renderLiveTtt(data.state);
+      }else if(data.type === 'connect4_state'){
+        renderLiveConnect4(data.state);
+      }else if(data.type === 'cursor_move'){
+        renderRemoteCursor(data.from, data.x, data.y, data.page);
+      }else if(data.type === 'whiteboard_draw'){
+        if(window._whiteboardDrawLine) window._whiteboardDrawLine(data.stroke.x1, data.stroke.y1, data.stroke.x2, data.stroke.y2);
+      }else if(data.type === 'whiteboard_clear'){
+        const wbCanvas = document.getElementById('whiteboardCanvas');
+        if(wbCanvas) wbCanvas.getContext('2d').clearRect(0, 0, wbCanvas.width, wbCanvas.height);
       }
     });
 
@@ -3677,6 +3763,234 @@
     };
     document.body.appendChild(toast);
     setTimeout(() => { toast.remove(); }, 5000);
+  }
+
+  /* ---- Live Tic-Tac-Toe (real opponent, server holds the authoritative state) ---- */
+  function openLiveTtt(){
+    switchView('livettt');
+    ensureChatConnection();
+    clearGameCursors();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'ttt_join' }));
+      }
+    }, 300); // brief delay so a fresh connection has time to open first
+    initGameCursorTracking('tttGameStage', 'livettt');
+  }
+
+  function renderLiveTtt(state){
+    const grid = document.getElementById('gridLiveTtt');
+    const statusEl = document.getElementById('tttLiveStatus');
+    if(!grid || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    grid.innerHTML = state.board.map((val, i) => {
+      const cls = val === 'X' ? 'x' : (val === 'O' ? 'o' : '');
+      return `<div class="tile-ttt ${cls} ${val ? 'filled' : ''}" onclick="sendTttMove(${i})">${val || ''}</div>`;
+    }).join('');
+
+    const mySymbol = state.players.X === myName ? 'X' : (state.players.O === myName ? 'O' : null);
+
+    if(state.winner === 'draw'){
+      statusEl.textContent = "It's a draw!";
+    }else if(state.winner){
+      statusEl.textContent = mySymbol
+        ? (state.winner === mySymbol ? 'You win!' : 'You lose!')
+        : `${state.winner} wins!`;
+    }else if(!state.players.X || !state.players.O){
+      statusEl.textContent = mySymbol ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!mySymbol){
+      statusEl.textContent = `Spectating — ${state.players.X} (X) vs ${state.players.O} (O). ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === mySymbol ? 'Your turn.' : `Waiting for ${state.turn === 'X' ? state.players.X : state.players.O}...`;
+    }
+  }
+
+  function sendTttMove(cell){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'ttt_move', cell }));
+    }
+  }
+
+  function sendTttReset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'ttt_reset' }));
+    }
+  }
+
+  /* ---- Live Connect 4 (same shared-game pattern) ---- */
+  function openLiveConnect4(){
+    switchView('liveconnect4');
+    ensureChatConnection();
+    clearGameCursors();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'connect4_join' }));
+      }
+    }, 300);
+    initGameCursorTracking('connect4GameStage', 'liveconnect4');
+  }
+
+  function renderLiveConnect4(state){
+    const grid = document.getElementById('gridLiveConnect4');
+    const statusEl = document.getElementById('connect4LiveStatus');
+    if(!grid || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    grid.innerHTML = state.board.map((val, i) => {
+      const col = i % 7;
+      const cls = val === 'red' ? 'red' : (val === 'yellow' ? 'yellow' : '');
+      return `<div class="cell-connect4 ${cls}" onclick="sendConnect4Move(${col})"></div>`;
+    }).join('');
+
+    const myColor = state.players.red === myName ? 'red' : (state.players.yellow === myName ? 'yellow' : null);
+
+    if(state.winner === 'draw'){
+      statusEl.textContent = "It's a draw!";
+    }else if(state.winner){
+      statusEl.textContent = myColor
+        ? (state.winner === myColor ? 'You win!' : 'You lose!')
+        : `${state.winner} wins!`;
+    }else if(!state.players.red || !state.players.yellow){
+      statusEl.textContent = myColor ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!myColor){
+      statusEl.textContent = `Spectating — ${state.players.red} (red) vs ${state.players.yellow} (yellow). ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === myColor ? 'Your turn.' : `Waiting for ${state.turn === 'red' ? state.players.red : state.players.yellow}...`;
+    }
+  }
+
+  function sendConnect4Move(col){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'connect4_move', col }));
+    }
+  }
+
+  function sendConnect4Reset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'connect4_reset' }));
+    }
+  }
+
+  /* ---- Shared Whiteboard ---- */
+  let whiteboardInitialized = false;
+  let whiteboardDrawing = false;
+  let whiteboardLastPoint = null;
+
+  function openWhiteboard(){
+    switchView('whiteboard');
+    ensureChatConnection();
+    clearGameCursors();
+    if(!whiteboardInitialized){
+      initWhiteboard();
+      whiteboardInitialized = true;
+    }
+  }
+
+  function initWhiteboard(){
+    const canvas = document.getElementById('whiteboardCanvas');
+    if(!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    function getPos(e){
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height };
+    }
+
+    function drawLine(x1, y1, x2, y2){
+      ctx.beginPath();
+      ctx.moveTo(x1 * canvas.width, y1 * canvas.height);
+      ctx.lineTo(x2 * canvas.width, y2 * canvas.height);
+      ctx.strokeStyle = '#16234F';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    window._whiteboardDrawLine = drawLine;
+
+    function startDraw(e){
+      whiteboardDrawing = true;
+      whiteboardLastPoint = getPos(e);
+    }
+    function moveDraw(e){
+      if(!whiteboardDrawing) return;
+      const pos = getPos(e);
+      drawLine(whiteboardLastPoint.x, whiteboardLastPoint.y, pos.x, pos.y);
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({
+          type: 'whiteboard_draw',
+          stroke: { x1: whiteboardLastPoint.x, y1: whiteboardLastPoint.y, x2: pos.x, y2: pos.y }
+        }));
+      }
+      whiteboardLastPoint = pos;
+      e.preventDefault();
+    }
+    function endDraw(){ whiteboardDrawing = false; }
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    canvas.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseleave', endDraw);
+    canvas.addEventListener('touchstart', startDraw);
+    canvas.addEventListener('touchmove', moveDraw);
+    canvas.addEventListener('touchend', endDraw);
+  }
+
+  function clearWhiteboard(){
+    const canvas = document.getElementById('whiteboardCanvas');
+    if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'whiteboard_clear' }));
+    }
+  }
+
+  /* ---- Live cursors — only shown on the two real-time multiplayer games ---- */
+  let cursorThrottleActive = false;
+
+  function initGameCursorTracking(stageId, pageId){
+    const stage = document.getElementById(stageId);
+    if(!stage || stage.dataset.cursorBound) return;
+    stage.dataset.cursorBound = 'true';
+    stage.addEventListener('mousemove', (e) => {
+      if(cursorThrottleActive) return;
+      cursorThrottleActive = true;
+      setTimeout(() => { cursorThrottleActive = false; }, 50);
+
+      const rect = stage.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = (e.clientY - rect.top) / rect.height;
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'cursor_move', page: pageId, x, y }));
+      }
+    });
+  }
+
+  function renderRemoteCursor(username, x, y, page){
+    const stageIdMap = { livettt: 'tttGameStage', liveconnect4: 'connect4GameStage' };
+    const stageId = stageIdMap[page];
+    if(!stageId || currentActiveView !== page) return;
+    const stage = document.getElementById(stageId);
+    if(!stage) return;
+
+    let dot = document.getElementById('cursor-' + username);
+    if(!dot){
+      dot = document.createElement('div');
+      dot.id = 'cursor-' + username;
+      dot.style.cssText = 'position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent-pink);pointer-events:none;z-index:50;transition:left .08s linear, top .08s linear;box-shadow:0 0 8px rgba(214,101,155,0.7);';
+      const label = document.createElement('div');
+      label.style.cssText = "position:absolute;top:12px;left:-4px;font-size:10px;color:var(--accent-pink);font-family:'IBM Plex Mono',monospace;white-space:nowrap;";
+      label.textContent = username;
+      dot.appendChild(label);
+      stage.appendChild(dot);
+    }
+    dot.style.left = (x * 100) + '%';
+    dot.style.top = (y * 100) + '%';
+  }
+
+  function clearGameCursors(){
+    document.querySelectorAll('[id^="cursor-"]').forEach(el => el.remove());
   }
 
   /* ---- Challenges Hub: Daily Trivia / Typing / Puzzle (personal use, no leaderboard) ---- */
