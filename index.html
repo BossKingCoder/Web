@@ -391,9 +391,14 @@
     from{opacity:0;transform:translateY(8px);}
     to{opacity:1;transform:translateY(0);}
   }
+  @keyframes toastIn{
+    from{opacity:0;transform:translateX(20px);}
+    to{opacity:1;transform:translateX(0);}
+  }
   @media (prefers-reduced-motion: reduce){
     .msg.msg-in{animation:none;}
     .typing-dots span{animation:none;opacity:1;}
+    .dm-toast{animation:none;}
   }
 
   /* ---- Shared skeleton loading shimmer ---- */
@@ -1573,8 +1578,9 @@
       <div class="game-score"><span id="chatOnlineCount">0</span> online</div>
     </div>
     <div id="livechatLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:400px;overflow-y:auto;padding:20px;margin-bottom:14px;"></div>
+    <div id="liveChatTypingIndicator" style="font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;"></div>
     <div class="chat-input-row">
-      <textarea id="livechatInput" placeholder="Message everyone here right now..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendLiveChatMessage();}"></textarea>
+      <textarea id="livechatInput" placeholder="Message everyone here right now..." oninput="handleLiveChatTyping()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendLiveChatMessage();}"></textarea>
       <button id="livechatSendBtn" onclick="sendLiveChatMessage()">Send</button>
     </div>
   </main>
@@ -1594,8 +1600,9 @@
       <div style="flex:1;min-width:280px;">
         <div class="cs-label" id="dmConversationHeader" style="margin-bottom:10px;">Pick someone online to start a conversation.</div>
         <div id="dmConversationLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;"></div>
+        <div id="dmTypingIndicator" style="font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;"></div>
         <div class="chat-input-row">
-          <textarea id="dmInput" placeholder="Type a direct message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDirectMessage();}"></textarea>
+          <textarea id="dmInput" placeholder="Type a direct message..." oninput="handleDmTyping()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDirectMessage();}"></textarea>
           <button id="dmSendBtn" onclick="sendDirectMessage()">Send</button>
         </div>
       </div>
@@ -3392,8 +3399,12 @@
   /* ---- Multiplayer Hub: Live Chat + Direct Messages (share one connection) ---- */
   let liveChatSocket = null;
   let onlineUsers = [];
-  let dmConversations = {}; // { username: [{from, text, timestamp}, ...] }
+  let dmConversations = {}; // { username: [{from, text, timestamp, status?}, ...] }
   let activeDmPartner = null;
+  let liveChatTypingUsers = new Set();
+  let dmTypingFrom = null;
+  let myLiveChatTypingTimeout = null;
+  let myDmTypingTimeout = null;
 
   function getChatDisplayName(){
     return window.__GUEST_USERNAME__ || 'Shaurya';
@@ -3445,8 +3456,40 @@
       }else if(data.type === 'dm'){
         const partner = data.from === myName ? data.to : data.from;
         if(!dmConversations[partner]) dmConversations[partner] = [];
-        dmConversations[partner].push({ from: data.from, text: data.text, timestamp: data.timestamp });
-        if(partner === activeDmPartner) renderDMConversation();
+        dmConversations[partner].push({
+          from: data.from,
+          text: data.text,
+          timestamp: data.timestamp,
+          status: data.from === myName ? 'sent' : undefined
+        });
+        if(data.from === dmTypingFrom) { dmTypingFrom = null; updateDmTypingIndicator(); }
+
+        if(partner === activeDmPartner){
+          renderDMConversation();
+          if(data.from !== myName) markDmConversationRead(partner);
+        }else if(data.from !== myName){
+          notifyNewDM(data.from, data.text);
+        }
+      }else if(data.type === 'dm_read'){
+        const partner = data.from;
+        if(dmConversations[partner]){
+          dmConversations[partner].forEach(m => { if(m.from === myName) m.status = 'read'; });
+          if(partner === activeDmPartner) renderDMConversation();
+        }
+      }else if(data.type === 'typing'){
+        if(data.context === 'dm'){
+          if(data.from === activeDmPartner){ dmTypingFrom = data.from; updateDmTypingIndicator(); }
+        }else{
+          liveChatTypingUsers.add(data.from);
+          updateLiveChatTypingIndicator();
+        }
+      }else if(data.type === 'stopped_typing'){
+        if(data.context === 'dm'){
+          if(data.from === dmTypingFrom){ dmTypingFrom = null; updateDmTypingIndicator(); }
+        }else{
+          liveChatTypingUsers.delete(data.from);
+          updateLiveChatTypingIndicator();
+        }
       }
     });
 
@@ -3498,6 +3541,25 @@
     if(!text || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
     liveChatSocket.send(JSON.stringify({ type: 'chat', text }));
     input.value = '';
+    clearTimeout(myLiveChatTypingTimeout);
+    liveChatSocket.send(JSON.stringify({ type: 'stopped_typing' }));
+  }
+
+  function handleLiveChatTyping(){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'typing' }));
+    clearTimeout(myLiveChatTypingTimeout);
+    myLiveChatTypingTimeout = setTimeout(() => {
+      liveChatSocket.send(JSON.stringify({ type: 'stopped_typing' }));
+    }, 2000);
+  }
+
+  function updateLiveChatTypingIndicator(){
+    const el = document.getElementById('liveChatTypingIndicator');
+    if(!el) return;
+    const names = Array.from(liveChatTypingUsers);
+    if(names.length === 0){ el.textContent = ''; return; }
+    el.textContent = names.join(', ') + (names.length === 1 ? ' is typing...' : ' are typing...');
   }
 
   /* ---- Direct Messages ---- */
@@ -3523,9 +3585,12 @@
 
   function selectDmPartner(username){
     activeDmPartner = username;
+    dmTypingFrom = null;
     document.getElementById('dmConversationHeader').textContent = 'Conversation with ' + username;
     renderDMContactList();
     renderDMConversation();
+    updateDmTypingIndicator();
+    markDmConversationRead(username);
   }
 
   function renderDMConversation(){
@@ -3533,12 +3598,25 @@
     if(!log || !activeDmPartner) return;
     const myName = getChatDisplayName();
     const messages = dmConversations[activeDmPartner] || [];
-    log.innerHTML = messages.map(m => `
-      <div class="msg ${m.from === myName ? 'user' : 'assistant'}">
-        <div class="who">${escapeHtml(m.from)}</div><div class="body">${escapeHtml(m.text)}</div>
-      </div>
-    `).join('');
+    log.innerHTML = messages.map(m => {
+      const isMe = m.from === myName;
+      const statusMark = isMe
+        ? (m.status === 'read'
+            ? ` <span style="color:var(--accent-pink);font-weight:600;">&#10003;&#10003;</span>`
+            : ` <span style="color:var(--slate-dim);">&#10003;</span>`)
+        : '';
+      return `
+        <div class="msg ${isMe ? 'user' : 'assistant'}">
+          <div class="who">${escapeHtml(m.from)}</div><div class="body">${escapeHtml(m.text)}${statusMark}</div>
+        </div>
+      `;
+    }).join('');
     log.scrollTop = log.scrollHeight;
+  }
+
+  function markDmConversationRead(username){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'dm_read', to: username }));
   }
 
   function sendDirectMessage(){
@@ -3547,6 +3625,58 @@
     if(!text || !activeDmPartner || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
     liveChatSocket.send(JSON.stringify({ type: 'dm', to: activeDmPartner, text }));
     input.value = '';
+    clearTimeout(myDmTypingTimeout);
+    liveChatSocket.send(JSON.stringify({ type: 'stopped_typing', to: activeDmPartner }));
+  }
+
+  function handleDmTyping(){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN || !activeDmPartner) return;
+    liveChatSocket.send(JSON.stringify({ type: 'typing', to: activeDmPartner }));
+    clearTimeout(myDmTypingTimeout);
+    myDmTypingTimeout = setTimeout(() => {
+      liveChatSocket.send(JSON.stringify({ type: 'stopped_typing', to: activeDmPartner }));
+    }, 2000);
+  }
+
+  function updateDmTypingIndicator(){
+    const el = document.getElementById('dmTypingIndicator');
+    if(!el) return;
+    el.textContent = dmTypingFrom ? (dmTypingFrom + ' is typing...') : '';
+  }
+
+  function notifyNewDM(fromUser, text){
+    playDmNotificationSound();
+    showDmToast(fromUser, text);
+  }
+
+  function playDmNotificationSound(){
+    try{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+      gainNode.gain.setValueAtTime(0.15, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      oscillator.start();
+      oscillator.stop(ctx.currentTime + 0.3);
+    }catch(e){}
+  }
+
+  function showDmToast(fromUser, text){
+    const toast = document.createElement('div');
+    toast.className = 'dm-toast';
+    toast.style.cssText = "position:fixed;top:76px;right:20px;background:var(--panel);border:1px solid var(--accent-pink);border-radius:8px;padding:14px 18px;max-width:280px;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.4);cursor:pointer;animation:toastIn .3s ease;";
+    toast.innerHTML = `<div style="font-family:'Bebas Neue',sans-serif;font-size:15px;color:var(--accent-pink);margin-bottom:4px;">${escapeHtml(fromUser)}</div><div style="font-size:13px;color:#F5F1E8;">${escapeHtml(text.slice(0, 80))}</div>`;
+    toast.onclick = () => {
+      openDirectMessages();
+      selectDmPartner(fromUser);
+      toast.remove();
+    };
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 5000);
   }
 
   /* ---- Challenges Hub: Daily Trivia / Typing / Puzzle (personal use, no leaderboard) ---- */
