@@ -25,6 +25,7 @@
     --accent-violet:#9B85D6;
     --accent-blue:#5B8DEF;
     --accent-red:#D9584F;
+    --accent-pink:#D6659B;
   }
   *{box-sizing:border-box;}
 
@@ -104,12 +105,12 @@
   .nav-link{
     position:relative;font-size:13px;color:var(--slate-dim);cursor:pointer;
     letter-spacing:.04em;text-transform:uppercase;padding:4px 0;
-    transition:color .15s ease;
+    transition:color .25s cubic-bezier(0.16,1,0.3,1);
   }
   .nav-link::after{
     content:'';position:absolute;left:0;right:0;bottom:-2px;height:1.5px;
     background:var(--brass);transform:scaleX(0);transform-origin:left;
-    transition:transform .2s ease;
+    transition:transform .3s cubic-bezier(0.16,1,0.3,1);
   }
   .nav-link.active{color:#F5F1E8;}
   .nav-link.active::after{transform:scaleX(1);}
@@ -119,11 +120,11 @@
   .view{
     display:none;
     opacity:0;
-    transform:translateY(18px);
-    transition:opacity .38s ease, transform .38s ease;
+    transform:translateY(14px) scale(0.985);
+    transition:opacity .42s cubic-bezier(0.16,1,0.3,1), transform .42s cubic-bezier(0.16,1,0.3,1);
   }
   .view.visible{display:block;}
-  .view.visible.active{opacity:1;transform:translateY(0);}
+  .view.visible.active{opacity:1;transform:translateY(0) scale(1);}
   @media (prefers-reduced-motion: reduce){
     .view{transition:none;}
   }
@@ -188,6 +189,16 @@
       repeating-linear-gradient(180deg, rgba(224,172,63,0.055) 0px, rgba(224,172,63,0.055) 1px, transparent 1px, transparent 32px),
       repeating-linear-gradient(90deg, rgba(224,172,63,0.045) 0px, rgba(224,172,63,0.045) 1px, transparent 1px, transparent 32px);
     mask-image:linear-gradient(180deg, black, transparent 88%);
+  }
+
+  .matrix-canvas{
+    position:absolute;inset:0;width:100%;height:100%;
+    opacity:0.16;pointer-events:none;
+    mask-image:linear-gradient(180deg, black, transparent 85%);
+    -webkit-mask-image:linear-gradient(180deg, black, transparent 85%);
+  }
+  @media (prefers-reduced-motion: reduce){
+    .matrix-canvas{display:none;}
   }
 
   .hero-inner{max-width:660px;position:relative;z-index:1;}
@@ -296,11 +307,18 @@
   .hub-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:14px;}
   .hub-card{
     background:var(--panel);border:1px solid var(--line);border-radius:10px;
-    padding:20px;cursor:pointer;transition:border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    padding:20px;cursor:pointer;
+    transition:border-color .3s cubic-bezier(0.16,1,0.3,1), transform .3s cubic-bezier(0.16,1,0.3,1), box-shadow .3s cubic-bezier(0.16,1,0.3,1);
     height:150px;display:flex;flex-direction:column;justify-content:flex-start;
-    opacity:0;
+    opacity:0;position:relative;overflow:hidden;
     animation:hubCardIn 0.45s ease forwards;
   }
+  .hub-card::before{
+    content:'';position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(circle 180px at var(--mx,50%) var(--my,50%), rgba(224,172,63,0.14), transparent 70%);
+    opacity:0;transition:opacity .4s ease;
+  }
+  .hub-card:hover::before{opacity:1;}
   .hub-card:nth-child(1){animation-delay:0.08s;}
   .hub-card:nth-child(2){animation-delay:0.22s;}
   .hub-card:nth-child(3){animation-delay:0.36s;}
@@ -316,8 +334,9 @@
   }
   @media (prefers-reduced-motion: reduce){
     .hub-card{animation:none;opacity:1;}
+    .hub-card::before{display:none;}
   }
-  .hub-card:hover{border-color:var(--brass-dim);transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,0.28);}
+  .hub-card:hover{border-color:var(--brass-dim);transform:translateY(-3px);box-shadow:0 12px 28px rgba(0,0,0,0.3);}
   .hub-card-title{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.03em;margin-bottom:6px;}
   .hub-card-desc{font-size:12.5px;color:var(--slate-dim);line-height:1.5;}
   .hub-icon{margin-bottom:10px;}
@@ -418,9 +437,9 @@
   .timer-btn{
     background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
     padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;letter-spacing:.02em;
-    transition:border-color .15s ease, color .15s ease;
+    transition:border-color .25s cubic-bezier(0.16,1,0.3,1), color .25s cubic-bezier(0.16,1,0.3,1), transform .25s cubic-bezier(0.16,1,0.3,1), background .25s cubic-bezier(0.16,1,0.3,1);
   }
-  .timer-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .timer-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;transform:translateY(-1px);}
   .timer-btn.primary{background:var(--brass);border-color:var(--brass);color:var(--ink);font-weight:600;}
   .timer-btn.primary:hover{background:var(--brass-soft);}
   .timer-sessions{font-size:12.5px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;}
@@ -697,7 +716,7 @@
     background:rgba(224,172,63,0.1);border:1px solid rgba(224,172,63,0.35);color:var(--brass-soft);
   }
   .timer-btn:disabled{opacity:0.4;cursor:default;}
-  .timer-btn:disabled:hover{border-color:var(--line);color:var(--slate);}
+  .timer-btn:disabled:hover{border-color:var(--line);color:var(--slate);transform:none;}
 
   /* ---- Responsive ---- */
   @media (max-width: 640px){
@@ -747,6 +766,7 @@
 
 <div class="view visible active" id="view-welcome">
   <div class="hero">
+    <canvas id="matrixCanvas" class="matrix-canvas"></canvas>
     <div class="hero-inner">
       <div class="hero-eyebrow"><span class="rule"></span>Personal workspace</div>
       <h1 id="title-welcome"><span class="title-text"></span><span class="cursor"></span></h1>
@@ -1662,7 +1682,7 @@
 
     if(current){
       current.classList.remove('active'); // fades/slides the old page out
-      setTimeout(() => current.classList.remove('visible'), 380);
+      setTimeout(() => current.classList.remove('visible'), 420);
     }
 
     setTimeout(() => {
@@ -1670,7 +1690,7 @@
       void target.offsetWidth; // force reflow so the transition actually plays
       target.classList.add('active');
       typeTitle(view);
-    }, current ? 190 : 0);
+    }, current ? 210 : 0);
   }
 
   /* ---- Global search ---- */
@@ -4284,6 +4304,58 @@
   initFacts().then(() => {
     setInterval(rotateFact, 30000);
   });
+
+  /* ---- Digital rain background (Welcome hero only, kept subtle) ---- */
+  function initMatrixRain(){
+    const canvas = document.getElementById('matrixCanvas');
+    if(!canvas) return;
+    if(window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const ctx = canvas.getContext('2d');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const fontSize = 15;
+    let columns, drops;
+
+    function resize(){
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      columns = Math.max(1, Math.floor(canvas.width / fontSize));
+      drops = Array.from({ length: columns }, () => Math.floor(Math.random() * -50));
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function draw(){
+      ctx.fillStyle = 'rgba(11, 21, 48, 0.13)'; // matches --ink — fades the trail rather than hard-clearing
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#6FE0A0'; // reuses the site's existing signal-green accent, not a random neon
+      ctx.font = fontSize + 'px monospace';
+
+      for(let i = 0; i < drops.length; i++){
+        const char = chars[Math.floor(Math.random() * chars.length)];
+        ctx.fillText(char, i * fontSize, drops[i] * fontSize);
+        if(drops[i] * fontSize > canvas.height && Math.random() > 0.975){
+          drops[i] = 0;
+        }
+        drops[i]++;
+      }
+    }
+    setInterval(draw, 55);
+  }
+  initMatrixRain();
+
+  /* ---- Cursor-following glow on hub cards ---- */
+  function initHubCardGlow(){
+    document.querySelectorAll('.hub-card').forEach(card => {
+      card.addEventListener('mousemove', e => {
+        const rect = card.getBoundingClientRect();
+        card.style.setProperty('--mx', (e.clientX - rect.left) + 'px');
+        card.style.setProperty('--my', (e.clientY - rect.top) + 'px');
+      });
+    });
+  }
+  initHubCardGlow();
 
   if(window.__GUEST_USERNAME__){
     document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
