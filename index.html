@@ -1655,7 +1655,7 @@
 
   function isViewAllowed(view){
     const allowed = window.__GUEST_ALLOWED_HUBS__;
-    if(!allowed) return true; // no restriction set — full access
+    if(!allowed || allowed.length === 0) return true; // no restriction set — full access
     const group = HUB_GROUPS[view];
     if(!group) return true; // welcome/home and anything ungrouped stays reachable
     return allowed.indexOf(group) !== -1;
@@ -4366,7 +4366,7 @@
     reportGuestActivity(currentActiveView);
     setInterval(() => reportGuestActivity(currentActiveView), 8000);
 
-    if(window.__GUEST_ALLOWED_HUBS__){
+    if(window.__GUEST_ALLOWED_HUBS__ && window.__GUEST_ALLOWED_HUBS__.length > 0){
       document.querySelectorAll('#view-home .hub-card[data-hub]').forEach(card => {
         if(window.__GUEST_ALLOWED_HUBS__.indexOf(card.dataset.hub) === -1){
           card.style.display = 'none';
