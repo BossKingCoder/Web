@@ -130,7 +130,7 @@
   }
 
   /* ---- Hub background atmosphere (Home, Study, Entertainment, Game, Utilities hubs only) ---- */
-  #view-home, #view-study, #view-entertainment, #view-games, #view-utilities, #view-challenges{
+  #view-home, #view-study, #view-entertainment, #view-games, #view-utilities, #view-challenges, #view-multiplayer{
     background-image:
       repeating-linear-gradient(180deg, rgba(224,172,63,0.028) 0px, rgba(224,172,63,0.028) 1px, transparent 1px, transparent 28px),
       repeating-linear-gradient(90deg, rgba(224,172,63,0.022) 0px, rgba(224,172,63,0.022) 1px, transparent 1px, transparent 28px),
@@ -163,6 +163,11 @@
   #view-challenges .cursor{background:var(--accent-red);}
   #view-challenges .hub-icon svg{stroke:var(--accent-red);}
   #view-challenges .hub-card:hover{border-color:var(--accent-red);box-shadow:0 10px 24px rgba(217,88,79,0.22);}
+
+  #view-multiplayer h2{color:var(--accent-pink);}
+  #view-multiplayer .cursor{background:var(--accent-pink);}
+  #view-multiplayer .hub-icon svg{stroke:var(--accent-pink);}
+  #view-multiplayer .hub-card:hover{border-color:var(--accent-pink);box-shadow:0 10px 24px rgba(214,101,155,0.22);}
 
   /* ---- Hero ---- */
   .hero{
@@ -827,6 +832,10 @@
       <div class="hub-card" data-hub="challenges" onclick="switchView('challenges')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M12 2l2.5 6.5H21l-5.5 4 2 6.5-5.5-4-5.5 4 2-6.5L3 8.5h6.5z"/></svg></div>
         <div class="hub-card-title">Challenges Hub</div>
         <div class="hub-card-desc">One new challenge a day, same for everyone — build a streak.</div>
+      </div>
+      <div class="hub-card" data-hub="multiplayer" onclick="switchView('multiplayer')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><path d="M2 20c0-3 2.5-5 6-5s6 2 6 5M11 20c0-3 2.5-5 6-5s6 2 6 5"/></svg></div>
+        <div class="hub-card-title">Multiplayer Hub</div>
+        <div class="hub-card-desc">Whoever else is on the site right now — chat live, no waiting.</div>
       </div>
     </div>
   </main>
@@ -1535,6 +1544,38 @@
   </main>
 </div>
 
+<div class="view" id="view-multiplayer">
+  <main>
+    <div class="view-head">
+      <h2 id="title-multiplayer"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Whoever else has the site open right now — features that happen live, together.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="openLiveChat()"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M7 21l3-3M14 21l-3-3"/></svg></div>
+        <div class="hub-card-title">Live Chat</div>
+        <div class="hub-card-desc">Talk with anyone else on the site right now — instant, not refreshed.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-livechat">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Chat</h2>
+        <div class="view-sub" id="chatConnectionStatus">Connecting...</div>
+      </div>
+      <div class="game-score"><span id="chatOnlineCount">0</span> online</div>
+    </div>
+    <div id="livechatLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:400px;overflow-y:auto;padding:20px;margin-bottom:14px;"></div>
+    <div class="chat-input-row">
+      <textarea id="livechatInput" placeholder="Message everyone here right now..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendLiveChatMessage();}"></textarea>
+      <button id="livechatSendBtn" onclick="sendLiveChatMessage()">Send</button>
+    </div>
+  </main>
+</div>
+
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
@@ -1547,7 +1588,8 @@
     utilities: "Utilities Hub", password: "Password Generator", counter: "Word Counter",
     countdown: "Countdown Timer", qrcode: "QR Code Generator", timecapsule: "Time Capsule",
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
-    dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle"
+    dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle",
+    multiplayer: "Multiplayer Hub", livechat: "Live Chat"
   };
   const NAV_TOGGLE = {
     welcome: { label: 'Home', target: 'home' },
@@ -1583,7 +1625,9 @@
     dailypuzzle: { label: 'Challenges Hub', target: 'challenges' },
     dailyscramble: { label: 'Challenges Hub', target: 'challenges' },
     dailymath: { label: 'Challenges Hub', target: 'challenges' },
-    dailyemoji: { label: 'Challenges Hub', target: 'challenges' }
+    dailyemoji: { label: 'Challenges Hub', target: 'challenges' },
+    multiplayer: { label: 'Home', target: 'home' },
+    livechat: { label: 'Multiplayer Hub', target: 'multiplayer' }
   };
 
   /* ---- Shared count-up animation ---- */
@@ -1626,7 +1670,8 @@
     utilities: 'var(--accent-blue)', calc: 'var(--accent-blue)', wheel: 'var(--accent-blue)',
     password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
-    dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)'
+    dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)',
+    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)'
   };
 
   let currentActiveView = 'welcome';
@@ -1650,7 +1695,8 @@
     utilities: 'utilities', calc: 'utilities', wheel: 'utilities', password: 'utilities', counter: 'utilities',
     countdown: 'utilities', qrcode: 'utilities', timecapsule: 'utilities',
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
-    dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges'
+    dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges',
+    multiplayer: 'multiplayer', livechat: 'multiplayer'
   };
 
   function isViewAllowed(view){
@@ -1822,7 +1868,8 @@
     whichx: 'Which X Are You?',
     wheel: 'Decision Wheel',
     utilities: 'Utilities Hub',
-    challenges: 'Challenges Hub'
+    challenges: 'Challenges Hub',
+    multiplayer: 'Multiplayer Hub'
   };
 
   function typeTitle(view){
@@ -3312,6 +3359,86 @@
       feedback.className = 'riddle-feedback incorrect';
     }
     btn.disabled = false;
+  }
+
+  /* ---- Multiplayer Hub: Live Chat ---- */
+  let liveChatSocket = null;
+
+  function getChatDisplayName(){
+    return window.__GUEST_USERNAME__ || 'Shaurya';
+  }
+
+  function openLiveChat(){
+    switchView('livechat');
+    if(!liveChatSocket || liveChatSocket.readyState === WebSocket.CLOSED){
+      connectLiveChat();
+    }
+  }
+
+  function connectLiveChat(){
+    const statusEl = document.getElementById('chatConnectionStatus');
+    const myName = getChatDisplayName();
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__chat_ws?username=' + encodeURIComponent(myName);
+
+    if(statusEl) statusEl.textContent = 'Connecting...';
+    liveChatSocket = new WebSocket(wsUrl);
+
+    liveChatSocket.addEventListener('open', () => {
+      if(statusEl) statusEl.textContent = 'Connected — live';
+    });
+
+    liveChatSocket.addEventListener('message', (event) => {
+      let data;
+      try{ data = JSON.parse(event.data); }catch(e){ return; }
+      if(data.type === 'chat'){
+        appendLiveChatMessage(data.username, data.text, data.username === myName);
+      }else if(data.type === 'system'){
+        appendLiveChatSystemMessage(data.text);
+      }else if(data.type === 'presence'){
+        const countEl = document.getElementById('chatOnlineCount');
+        if(countEl) countEl.textContent = data.count;
+      }
+    });
+
+    liveChatSocket.addEventListener('close', () => {
+      if(statusEl) statusEl.textContent = 'Disconnected — reconnecting...';
+      setTimeout(() => {
+        const view = document.getElementById('view-livechat');
+        if(view && view.classList.contains('visible')) connectLiveChat();
+      }, 3000);
+    });
+
+    liveChatSocket.addEventListener('error', () => {
+      if(liveChatSocket) liveChatSocket.close();
+    });
+  }
+
+  function appendLiveChatMessage(username, text, isMe){
+    const log = document.getElementById('livechatLog');
+    if(!log) return;
+    const div = document.createElement('div');
+    div.className = 'msg ' + (isMe ? 'user' : 'assistant') + ' msg-in';
+    div.innerHTML = `<div class="who">${escapeHtml(username)}</div><div class="body">${escapeHtml(text)}</div>`;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function appendLiveChatSystemMessage(text){
+    const log = document.getElementById('livechatLog');
+    if(!log) return;
+    const div = document.createElement('div');
+    div.style.cssText = "text-align:center;color:var(--slate-dim);font-size:12px;font-family:'IBM Plex Mono',monospace;margin-bottom:10px;";
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function sendLiveChatMessage(){
+    const input = document.getElementById('livechatInput');
+    const text = input.value.trim();
+    if(!text || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'chat', text }));
+    input.value = '';
   }
 
   /* ---- Challenges Hub: Daily Trivia / Typing / Puzzle (personal use, no leaderboard) ---- */
