@@ -1827,7 +1827,10 @@
 
   function typeTitle(view){
     const container = document.getElementById('title-' + view);
-    const text = TITLE_TEXTS[view];
+    let text = TITLE_TEXTS[view];
+    if(view === 'welcome' && window.__GUEST_USERNAME__){
+      text = 'Welcome back, ' + window.__GUEST_USERNAME__;
+    }
     if(!container || !text) return;
     const span = container.querySelector('.title-text');
     if(!span) return;
