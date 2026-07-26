@@ -75,6 +75,19 @@
   }
   .nav-pin-badge:hover{border-color:var(--brass-dim);}
 
+  .nav-call-bar{
+    display:flex;align-items:center;gap:8px;
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--signal);
+    background:var(--panel);border:1px solid var(--signal);border-radius:20px;
+    padding:6px 8px 6px 14px;white-space:nowrap;
+  }
+  .nav-call-bar button{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:4px 10px;border-radius:12px;font-size:11px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;transition:border-color .15s ease, color .15s ease;
+  }
+  .nav-call-bar button:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+
   /* ---- Global search ---- */
   .nav-search-wrap{position:relative;flex:1;max-width:360px;margin:0 24px;}
   .nav-search-input{
@@ -784,6 +797,11 @@
   </div>
   <div class="nav-links">
     <div class="nav-pin-badge" id="navPinBadge" style="display:none;" onclick="switchView('countdown')"></div>
+    <div class="nav-call-bar" id="navCallBar" style="display:none;">
+      <span id="navCallText"></span>
+      <button onclick="toggleMuteVoiceCall()" id="navMuteBtn">Mute</button>
+      <button onclick="endVoiceCall(true)">Hang Up</button>
+    </div>
     <a class="nav-link" href="/admin" style="text-decoration:none;">Admin</a>
     <div class="nav-link active" id="navToggle" onclick="switchView('home')">Home</div>
   </div>
@@ -1591,6 +1609,10 @@
         <div class="hub-card-title">Shared Whiteboard</div>
         <div class="hub-card-desc">Draw together, live — anyone connected sees every stroke.</div>
       </div>
+      <div class="hub-card" onclick="openLiveWordChain()"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="9" height="8" rx="4"/><rect x="13" y="8" width="9" height="8" rx="4"/></svg></div>
+        <div class="hub-card-title">Live Word Chain</div>
+        <div class="hub-card-desc">A real person building the chain with you this time, not the AI.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -1625,7 +1647,27 @@
         <div id="dmContactList"></div>
       </div>
       <div style="flex:1;min-width:280px;">
-        <div class="cs-label" id="dmConversationHeader" style="margin-bottom:10px;">Pick someone online to start a conversation.</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <div class="cs-label" id="dmConversationHeader" style="margin-bottom:0;">Pick someone online to start a conversation.</div>
+          <button class="clear-btn" id="voiceCallBtn" onclick="startVoiceCall()" style="display:none;">Call</button>
+        </div>
+
+        <div id="incomingCallBanner" style="display:none;background:var(--panel-raised);border:1px solid var(--accent-pink);border-radius:8px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div id="incomingCallText" style="font-size:14px;color:#F5F1E8;"></div>
+          <div style="display:flex;gap:8px;">
+            <button class="timer-btn primary" onclick="acceptVoiceCall()">Accept</button>
+            <button class="timer-btn" onclick="rejectVoiceCall()">Decline</button>
+          </div>
+        </div>
+
+        <div id="activeCallBar" style="display:none;background:var(--panel-raised);border:1px solid var(--signal);border-radius:8px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div id="activeCallText" style="font-size:14px;color:var(--signal);"></div>
+          <div style="display:flex;gap:8px;">
+            <button class="timer-btn" id="muteCallBtn" onclick="toggleMuteVoiceCall()">Mute</button>
+            <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+          </div>
+        </div>
+
         <div id="dmConversationLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;"></div>
         <div id="dmTypingIndicator" style="font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;"></div>
         <div class="chat-input-row">
@@ -1680,6 +1722,26 @@
   </main>
 </div>
 
+<div class="view" id="view-livewordchain">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Word Chain</h2>
+        <div class="view-sub" id="liveWordChainStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendLiveWordChainReset()">New Chain</button>
+    </div>
+    <div class="chain-display" id="liveWordChainDisplay">
+      <div class="placeholder-note">Waiting for a chain to start.</div>
+    </div>
+    <div class="quick-add">
+      <input id="liveWordChainInput" placeholder="Your word..." onkeydown="if(event.key==='Enter'){event.preventDefault();sendLiveWordChainMove();}">
+      <button onclick="sendLiveWordChainMove()" id="liveWordChainSendBtn">Add</button>
+    </div>
+    <div class="riddle-feedback" id="liveWordChainFeedback"></div>
+  </main>
+</div>
+
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
@@ -1694,7 +1756,8 @@
     challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
     dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle",
     multiplayer: "Multiplayer Hub", livechat: "Live Chat", directmessages: "Direct Messages",
-    livettt: "Live Tic-Tac-Toe", liveconnect4: "Live Connect 4", whiteboard: "Shared Whiteboard"
+    livettt: "Live Tic-Tac-Toe", liveconnect4: "Live Connect 4", whiteboard: "Shared Whiteboard",
+    livewordchain: "Live Word Chain"
   };
   const NAV_TOGGLE = {
     welcome: { label: 'Home', target: 'home' },
@@ -1736,7 +1799,8 @@
     directmessages: { label: 'Multiplayer Hub', target: 'multiplayer' },
     livettt: { label: 'Multiplayer Hub', target: 'multiplayer' },
     liveconnect4: { label: 'Multiplayer Hub', target: 'multiplayer' },
-    whiteboard: { label: 'Multiplayer Hub', target: 'multiplayer' }
+    whiteboard: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    livewordchain: { label: 'Multiplayer Hub', target: 'multiplayer' }
   };
 
   /* ---- Shared count-up animation ---- */
@@ -1781,7 +1845,8 @@
     challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
     dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)',
     multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)', directmessages: 'var(--accent-pink)',
-    livettt: 'var(--accent-pink)', liveconnect4: 'var(--accent-pink)', whiteboard: 'var(--accent-pink)'
+    livettt: 'var(--accent-pink)', liveconnect4: 'var(--accent-pink)', whiteboard: 'var(--accent-pink)',
+    livewordchain: 'var(--accent-pink)'
   };
 
   let currentActiveView = 'welcome';
@@ -1807,7 +1872,8 @@
     challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
     dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges',
     multiplayer: 'multiplayer', livechat: 'multiplayer', directmessages: 'multiplayer',
-    livettt: 'multiplayer', liveconnect4: 'multiplayer', whiteboard: 'multiplayer'
+    livettt: 'multiplayer', liveconnect4: 'multiplayer', whiteboard: 'multiplayer',
+    livewordchain: 'multiplayer'
   };
 
   function isViewAllowed(view){
@@ -3570,6 +3636,8 @@
         renderLiveTtt(data.state);
       }else if(data.type === 'connect4_state'){
         renderLiveConnect4(data.state);
+      }else if(data.type === 'wordchain_state'){
+        renderLiveWordChain(data.state);
       }else if(data.type === 'cursor_move'){
         renderRemoteCursor(data.from, data.x, data.y, data.page);
       }else if(data.type === 'whiteboard_draw'){
@@ -3577,6 +3645,24 @@
       }else if(data.type === 'whiteboard_clear'){
         const wbCanvas = document.getElementById('whiteboardCanvas');
         if(wbCanvas) wbCanvas.getContext('2d').clearRect(0, 0, wbCanvas.width, wbCanvas.height);
+      }else if(data.type === 'voice_call_request'){
+        showIncomingCallBanner(data.from);
+      }else if(data.type === 'voice_offer'){
+        pendingVoiceOffer = { from: data.from, sdp: data.sdp };
+      }else if(data.type === 'voice_answer'){
+        if(voiceCallState && voiceCallState.pc){
+          voiceCallState.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+            .then(() => updateVoiceCallUI('active', voiceCallState.partner))
+            .catch(() => {});
+        }
+      }else if(data.type === 'voice_ice_candidate'){
+        if(voiceCallState && voiceCallState.pc && data.candidate){
+          voiceCallState.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+        }
+      }else if(data.type === 'voice_call_end'){
+        hideIncomingCallBanner();
+        pendingVoiceOffer = null;
+        endVoiceCall(false);
       }
     });
 
@@ -3678,6 +3764,8 @@
     renderDMConversation();
     updateDmTypingIndicator();
     markDmConversationRead(username);
+    const callBtn = document.getElementById('voiceCallBtn');
+    if(callBtn) callBtn.style.display = voiceCallState ? 'none' : 'inline-block';
   }
 
   function renderDMConversation(){
@@ -3992,6 +4080,235 @@
 
   function clearGameCursors(){
     document.querySelectorAll('[id^="cursor-"]').forEach(el => el.remove());
+  }
+
+  /* ---- Live Word Chain (real opponent, no AI — server holds the authoritative chain) ---- */
+  function openLiveWordChain(){
+    switchView('livewordchain');
+    ensureChatConnection();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'wordchain_join' }));
+      }
+    }, 300);
+  }
+
+  function renderLiveWordChain(state){
+    const display = document.getElementById('liveWordChainDisplay');
+    const statusEl = document.getElementById('liveWordChainStatus');
+    if(!display || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    if(state.chain.length === 0){
+      display.innerHTML = '<div class="placeholder-note">Type a word below to start the chain.</div>';
+    }else{
+      display.innerHTML = state.chain.map((word, i) => {
+        const isFirstPlayerWord = i % 2 === 0;
+        const tag = `<span class="chain-word ${isFirstPlayerWord ? 'you' : 'claude'}">${escapeHtml(word)}</span>`;
+        return i === 0 ? tag : `<span class="chain-arrow">→</span>${tag}`;
+      }).join('');
+    }
+
+    const amPlaying = state.players.first === myName || state.players.second === myName;
+
+    if(!state.players.first || !state.players.second){
+      statusEl.textContent = amPlaying ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!amPlaying){
+      statusEl.textContent = `Spectating — ${state.players.first} and ${state.players.second}. ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === myName ? 'Your turn.' : `Waiting for ${state.turn}...`;
+    }
+  }
+
+  function sendLiveWordChainMove(){
+    const input = document.getElementById('liveWordChainInput');
+    const feedback = document.getElementById('liveWordChainFeedback');
+    const word = input.value.trim();
+    feedback.textContent = '';
+    if(!word) return;
+    if(word.includes(' ')){
+      feedback.textContent = 'One word at a time.';
+      return;
+    }
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'wordchain_move', word }));
+    }
+    input.value = '';
+  }
+
+  function sendLiveWordChainReset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'wordchain_reset' }));
+    }
+  }
+
+  /* ---- Voice calls in Direct Messages ---- */
+  let voiceCallState = null; // { pc, partner, localStream, muted }
+  let pendingVoiceOffer = null; // { from, sdp } — set when an offer arrives before Accept is clicked
+
+  async function fetchTurnCredentials(){
+    const response = await fetch('/__get_turn_credentials', { method: 'POST' });
+    const data = await response.json();
+    if(!data.ok) throw new Error('No call credentials available.');
+    return data.iceServers;
+  }
+
+  function playRemoteAudio(stream){
+    let audioEl = document.getElementById('remoteCallAudio');
+    if(!audioEl){
+      audioEl = document.createElement('audio');
+      audioEl.id = 'remoteCallAudio';
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+    }
+    audioEl.srcObject = stream;
+  }
+
+  async function startVoiceCall(){
+    if(!activeDmPartner || voiceCallState) return;
+    const partner = activeDmPartner;
+
+    try{
+      const iceServers = await fetchTurnCredentials();
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const pc = new RTCPeerConnection({ iceServers });
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (e) => {
+        if(e.candidate && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+          liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: partner, candidate: e.candidate }));
+        }
+      };
+      pc.ontrack = (e) => playRemoteAudio(e.streams[0]);
+      pc.onconnectionstatechange = () => {
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+          endVoiceCall(false);
+        }
+      };
+
+      voiceCallState = { pc, partner, localStream, muted: false };
+      updateVoiceCallUI('calling', partner);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      liveChatSocket.send(JSON.stringify({ type: 'voice_call_request', to: partner }));
+      liveChatSocket.send(JSON.stringify({ type: 'voice_offer', to: partner, sdp: offer }));
+    }catch(e){
+      alert("Couldn't start the call — check that microphone access is allowed.");
+      voiceCallState = null;
+      updateVoiceCallUI('idle');
+    }
+  }
+
+  function showIncomingCallBanner(fromUser){
+    if(voiceCallState) return; // already on a call — ignore
+    const banner = document.getElementById('incomingCallBanner');
+    const text = document.getElementById('incomingCallText');
+    if(!banner || !text) return;
+    text.textContent = fromUser + ' is calling...';
+    banner.style.display = 'flex';
+  }
+
+  function hideIncomingCallBanner(){
+    const banner = document.getElementById('incomingCallBanner');
+    if(banner) banner.style.display = 'none';
+  }
+
+  async function acceptVoiceCall(){
+    if(!pendingVoiceOffer) return;
+    const { from, sdp } = pendingVoiceOffer;
+
+    try{
+      const iceServers = await fetchTurnCredentials();
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const pc = new RTCPeerConnection({ iceServers });
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (e) => {
+        if(e.candidate && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+          liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: from, candidate: e.candidate }));
+        }
+      };
+      pc.ontrack = (e) => playRemoteAudio(e.streams[0]);
+      pc.onconnectionstatechange = () => {
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+          endVoiceCall(false);
+        }
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      liveChatSocket.send(JSON.stringify({ type: 'voice_answer', to: from, sdp: answer }));
+
+      voiceCallState = { pc, partner: from, localStream, muted: false };
+      pendingVoiceOffer = null;
+      hideIncomingCallBanner();
+      updateVoiceCallUI('active', from);
+    }catch(e){
+      alert("Couldn't join the call — check that microphone access is allowed.");
+      pendingVoiceOffer = null;
+      hideIncomingCallBanner();
+    }
+  }
+
+  function rejectVoiceCall(){
+    if(pendingVoiceOffer && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'voice_call_end', to: pendingVoiceOffer.from }));
+    }
+    pendingVoiceOffer = null;
+    hideIncomingCallBanner();
+  }
+
+  function endVoiceCall(notifyOther){
+    if(voiceCallState){
+      if(notifyOther && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'voice_call_end', to: voiceCallState.partner }));
+      }
+      try{ voiceCallState.pc.close(); }catch(e){}
+      voiceCallState.localStream.getTracks().forEach(t => t.stop());
+      voiceCallState = null;
+    }
+    const audioEl = document.getElementById('remoteCallAudio');
+    if(audioEl) audioEl.srcObject = null;
+    updateVoiceCallUI('idle');
+  }
+
+  function toggleMuteVoiceCall(){
+    if(!voiceCallState) return;
+    voiceCallState.muted = !voiceCallState.muted;
+    voiceCallState.localStream.getAudioTracks().forEach(track => { track.enabled = !voiceCallState.muted; });
+    const btn = document.getElementById('muteCallBtn');
+    if(btn) btn.textContent = voiceCallState.muted ? 'Unmute' : 'Mute';
+    const navBtn = document.getElementById('navMuteBtn');
+    if(navBtn) navBtn.textContent = voiceCallState.muted ? 'Unmute' : 'Mute';
+  }
+
+  function updateVoiceCallUI(state, partner){
+    const callBtn = document.getElementById('voiceCallBtn');
+    const activeBar = document.getElementById('activeCallBar');
+    const activeText = document.getElementById('activeCallText');
+    const navBar = document.getElementById('navCallBar');
+    const navText = document.getElementById('navCallText');
+    if(!callBtn || !activeBar || !activeText || !navBar || !navText) return;
+
+    if(state === 'idle'){
+      activeBar.style.display = 'none';
+      callBtn.style.display = activeDmPartner ? 'inline-block' : 'none';
+      navBar.style.display = 'none';
+    }else if(state === 'calling'){
+      callBtn.style.display = 'none';
+      activeBar.style.display = 'flex';
+      activeText.textContent = 'Calling ' + partner + '...';
+      navBar.style.display = 'flex';
+      navText.textContent = 'Calling ' + partner + '...';
+    }else if(state === 'active'){
+      callBtn.style.display = 'none';
+      activeBar.style.display = 'flex';
+      activeText.textContent = 'On call with ' + partner;
+      navBar.style.display = 'flex';
+      navText.textContent = 'On call: ' + partner;
+    }
   }
 
   /* ---- Challenges Hub: Daily Trivia / Typing / Puzzle (personal use, no leaderboard) ---- */
