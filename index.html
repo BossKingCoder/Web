@@ -876,6 +876,9 @@
         <div class="hub-card-desc">Whoever else is on the site right now — chat live, no waiting.</div>
       </div>
     </div>
+    <div style="text-align:center;margin-top:32px;">
+      <button class="timer-btn primary" onclick="surpriseMe()">🎲 Surprise Me</button>
+    </div>
   </main>
 </div>
 
@@ -1882,6 +1885,23 @@
     const group = HUB_GROUPS[view];
     if(!group) return true; // welcome/home and anything ungrouped stays reachable
     return allowed.indexOf(group) !== -1;
+  }
+
+  const SURPRISE_POOL = [
+    'chat',
+    'timer', 'calc', 'formulas', 'vocab', 'ambient',
+    'riddles', 'excuse', 'whichx',
+    'snake', 'game2048', 'puzzle15', 'reaction', 'tictactoe', 'wordchain',
+    'password', 'counter', 'countdown', 'qrcode', 'timecapsule', 'wheel',
+    'dailytrivia', 'dailytyping', 'dailypuzzle', 'dailyscramble', 'dailymath', 'dailyemoji',
+    'livechat', 'directmessages', 'livettt', 'liveconnect4', 'whiteboard', 'livewordchain'
+  ];
+
+  function surpriseMe(){
+    const pool = SURPRISE_POOL.filter(isViewAllowed);
+    if(pool.length === 0) return;
+    const choice = pool[Math.floor(Math.random() * pool.length)];
+    switchView(choice);
   }
 
   function switchView(view){
