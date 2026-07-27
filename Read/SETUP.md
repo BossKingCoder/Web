@@ -11,7 +11,7 @@ Private notes for redeploying this from scratch if needed. Lists what's required
 ## GitHub Pages
 
 - Repo: `BossKingCoder/Web`
-- Pages source: deploy from branch `main`, root
+- Pages source: deploy from branch `main`, `/Code`
 - Custom domain set to `shauryashub.dev` in repo Settings → Pages
 
 ## `site-lock` Worker
@@ -27,9 +27,9 @@ Deployed via **Wrangler**, not the dashboard editor (required for the Durable Ob
 - `TURN_KEY_ID` — from Cloudflare Calls → TURN key
 - `TURN_KEY_TOKEN` — from Cloudflare Calls → TURN key
 
-**Bindings** (defined in `wrangler.jsonc`):
+**Bindings** (defined in `Code/wrangler.jsonc`):
 - KV namespace `GUEST_KV` — stores guest records, maintenance state, time capsules, an owner-password override, pending confirmations
-- Durable Object `CHAT_ROOM` → class `ChatRoom` — needs the migration block in `wrangler.jsonc` to register correctly; this is why plain dashboard deploys don't work for this Worker
+- Durable Object `CHAT_ROOM` → class `ChatRoom` — needs the migration block in `Code/wrangler.jsonc` to register correctly; this is why plain dashboard deploys don't work for this Worker
 
 **Cron Trigger:**
 - Add via dashboard: Worker → Settings → Triggers → Cron Triggers
@@ -37,9 +37,9 @@ Deployed via **Wrangler**, not the dashboard editor (required for the Durable Ob
 
 **To deploy:**
 ```
-cd <project folder containing site-lock-worker.js and wrangler.jsonc>
+cd <project folder containing /workers/site-lock-worker.js and /Code/wrangler.jsonc>
 npx wrangler login
-npx wrangler deploy
+npx wrangler deploy --config Code/wrangler.jsonc
 ```
 
 ## `gemini-proxy` Worker
