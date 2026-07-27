@@ -6,10 +6,10 @@ A personal dashboard site — study tools, games, an AI assistant, and a live mu
 
 ## What's in here
 
-- `Code/index.html` — the site itself. A single-file frontend (vanilla JS, no framework) covering Study Hub, Entertainment Hub, Game Hub, Utilities Hub, Challenges Hub, and Multiplayer Hub.
-- `workers/site-lock-worker.js` — the Cloudflare Worker that gatekeeps the whole site: login, the `/admin` panel, guest management, maintenance mode, and the real-time infrastructure (a Durable Object powering Live Chat, DMs, voice calls, and live multiplayer games).
-- `workers/gemini-proxy-worker.js` — a small Worker that proxies requests to the Gemini API, so the API key never touches the browser.
-- `Code/wrangler.jsonc` — deployment config for `workers/site-lock-worker.js` (KV binding, Durable Object binding/migration).
+- `index.html` — the site itself. A single-file frontend (vanilla JS, no framework) covering Study Hub, Entertainment Hub, Game Hub, Utilities Hub, Challenges Hub, and Multiplayer Hub.
+- `site-lock-worker.js` — the Cloudflare Worker that gatekeeps the whole site: login, the `/admin` panel, guest management, maintenance mode, and the real-time infrastructure (a Durable Object powering Live Chat, DMs, voice calls, and live multiplayer games).
+- `gemini-proxy-worker.js` — a small Worker that proxies requests to the Gemini API, so the API key never touches the browser.
+- `wrangler.jsonc` — deployment config for `site-lock-worker.js` (KV binding, Durable Object binding/migration).
 
 ## Stack
 
@@ -21,8 +21,12 @@ A personal dashboard site — study tools, games, an AI assistant, and a live mu
 
 ## Deploying
 
-`Code/index.html` is the site frontend file.
+`index.html` deploys via GitHub Pages automatically on push to `main`.
 
-`workers/site-lock-worker.js` requires Wrangler (not the plain dashboard editor), since it uses a Durable Object. See `Read/SETUP.md` for the full setup from scratch.
+`site-lock-worker.js` requires Wrangler (not the plain dashboard editor), since it uses a Durable Object. See `SETUP.md` for the full setup from scratch.
 
-`workers/gemini-proxy-worker.js` can be deployed via the Cloudflare dashboard's code editor directly.
+`gemini-proxy-worker.js` can be deployed via the Cloudflare dashboard's code editor directly.
+
+## Credit
+
+This was a for-fun personal project. I (Shaurya) came up with the idea, every feature, and all the content — Claude (Anthropic) wrote the actual code, working from my direction throughout.
