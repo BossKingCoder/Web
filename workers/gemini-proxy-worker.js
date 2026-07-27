@@ -1,0 +1,52 @@
+export default {
+  async fetch(request, env, ctx) {
+    const allowedOrigins = ['https://shauryashub.dev', 'https://www.shauryashub.dev'];
+    const origin = request.headers.get('Origin');
+
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': allowedOrigins.includes(origin) ? origin : '',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405, headers: corsHeaders });
+    }
+
+    // The site sends: { model: "gemini-2.0-flash", contents: [...], systemInstruction: {...} (optional) }
+    const requestBody = await request.json();
+    const model = requestBody.model || 'gemini-3.1-flash-lite';
+
+    const geminiPayload = {
+      contents: requestBody.contents,
+    };
+    if (requestBody.systemInstruction) {
+      geminiPayload.systemInstruction = requestBody.systemInstruction;
+    }
+
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+    const geminiResponse = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify(geminiPayload),
+    });
+
+    const responseBody = await geminiResponse.text();
+
+    return new Response(responseBody, {
+      status: geminiResponse.status,
+      headers: {
+        'Content-Type': 'application/json',
+        ...corsHeaders,
+      },
+    });
+  }
+};
