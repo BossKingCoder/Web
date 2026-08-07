@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0E1B3D">
 <link rel="icon" href="/favicon.ico" sizes="any">
-<title>Shaurya's Workspace</title>
+<title>Shaurya's Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -790,7 +790,7 @@
 <body>
 
 <nav>
-  <div class="brand-name" id="brandName">Shaurya's Workspace</div>
+  <div class="brand-name" id="brandName">Shaurya's Hub</div>
   <div class="nav-search-wrap" id="globalSearchWrap">
     <input type="text" id="globalSearch" class="nav-search-input" placeholder="Search pages, formulas, vocab..." oninput="handleGlobalSearch()" onkeydown="if(event.key==='Escape') closeGlobalSearch();">
     <div class="nav-search-results" id="globalSearchResults"></div>
@@ -1748,7 +1748,7 @@
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
-    welcome: "Shaurya's Workspace", home: "Home", chat: "AI Assistant", timer: "Focus Timer",
+    welcome: "Shaurya's Hub", home: "Home", chat: "AI Assistant", timer: "Focus Timer",
     study: "Study Hub", entertainment: "Entertainment Hub", riddles: "Riddles & Jokes",
     games: "Game Hub", snake: "Snake", game2048: "2048", puzzle15: "15 Puzzle", reaction: "Reaction Test",
     tictactoe: "Tic-Tac-Toe", wordchain: "Word Chain",
@@ -1911,7 +1911,7 @@
     const target = document.getElementById('view-' + view);
     if(!target || current === target) return;
 
-    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Workspace";
+    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Hub";
     const nav = NAV_TOGGLE[view];
     if(nav){
       const navEl = document.getElementById('navToggle');
