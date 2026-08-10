@@ -327,6 +327,18 @@
   .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
   .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
   .chat-sidebar-empty{color:#6C7BA3;font-size:12px;padding:8px 4px;}
+  .chat-conv-list{margin-bottom:4px;}
+  .chat-memory-toggle{
+    margin-top:14px;padding-top:14px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--slate-dim);cursor:pointer;text-align:center;
+    transition:color .15s ease;
+  }
+  .chat-memory-toggle:hover{color:var(--brass-soft);}
+  .chat-memory-viewer{
+    display:none;margin-top:10px;padding:10px;background:var(--ink);border:1px solid var(--line);
+    border-radius:6px;font-size:11.5px;color:var(--slate);line-height:1.6;white-space:pre-wrap;
+  }
+  .chat-memory-viewer.visible{display:block;}
   .chat-main-area{flex:1;min-width:0;}
   .view-head{margin-bottom:22px;}
   .view-head h2{font-size:34px;margin-bottom:8px;}
@@ -914,6 +926,8 @@
     <div class="chat-sidebar">
       <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
       <div class="chat-conv-list" id="chatConvList"></div>
+      <div class="chat-memory-toggle" onclick="toggleMemoryViewer()">What I remember about you</div>
+      <div class="chat-memory-viewer" id="chatMemoryViewer"></div>
     </div>
     <div class="chat-main-area">
       <div class="view-head chat-head">
@@ -2183,9 +2197,55 @@
   let chatHistory = [];
   let currentConversationId = null;
   let conversationList = [];
+  let userMemoryNotes = '';
 
   function chatIdentity(){
     return window.__GUEST_USERNAME__ || '';
+  }
+
+  async function loadMemoryNotes(){
+    try{
+      const response = await fetch('/__ai_memory_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      userMemoryNotes = data.notes || '';
+    }catch(e){ userMemoryNotes = ''; }
+  }
+
+  function toggleMemoryViewer(){
+    const viewer = document.getElementById('chatMemoryViewer');
+    if(!viewer) return;
+    const isVisible = viewer.classList.contains('visible');
+    if(isVisible){
+      viewer.classList.remove('visible');
+      return;
+    }
+    viewer.textContent = userMemoryNotes.trim()
+      ? userMemoryNotes
+      : "Nothing remembered yet — it builds up as you chat.";
+    viewer.classList.add('visible');
+  }
+
+  // Called whenever a conversation is left behind (switching chats, or starting a
+  // new one) — asks the AI what's actually worth remembering from it, then saves
+  // that as a short note. Runs in the background; never blocks the UI on it.
+  async function extractAndSaveMemory(outgoingHistory){
+    if(!outgoingHistory || outgoingHistory.length < 2) return; // nothing meaningful to learn from a near-empty chat
+    try{
+      const extractionPrompt = `Based on this conversation, write 1-3 short, durable facts worth remembering about this user for future conversations (things like their subjects, ongoing projects, or how they like things explained) — not the specific questions they asked. Reply with just the facts, one per line, no preamble. If genuinely nothing durable stood out, reply with exactly: NONE`;
+      const summary = await callGeminiChat(outgoingHistory, extractionPrompt);
+      if(summary && summary.trim() && summary.trim().toUpperCase() !== 'NONE'){
+        await fetch('/__ai_memory_save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), notes: summary.trim() })
+        });
+        loadMemoryNotes(); // refresh so the very next message already benefits from it
+      }
+    }catch(e){ /* memory extraction is a courtesy — never let it disrupt the actual chat */ }
   }
 
   async function loadConversationList(){
@@ -2216,6 +2276,10 @@
   }
 
   async function openConversation(id){
+    if(id === currentConversationId) return; // already there, nothing to switch away from
+    const outgoing = chatHistory;
+    extractAndSaveMemory(outgoing); // fire-and-forget — don't block switching on this
+
     try{
       const response = await fetch('/__ai_conv_load', {
         method: 'POST',
@@ -2231,6 +2295,10 @@
   }
 
   function startNewChat(){
+    const outgoing = chatHistory;
+    if(currentConversationId !== null || outgoing.length > 0){
+      extractAndSaveMemory(outgoing); // fire-and-forget
+    }
     chatHistory = [];
     currentConversationId = null;
     renderChat();
@@ -2487,7 +2555,10 @@
     log.scrollTop = log.scrollHeight;
 
     try{
-      const reply = await callGeminiChat(chatHistory, CHAT_SYSTEM_PROMPT) || 'No response.';
+      const promptWithMemory = userMemoryNotes
+        ? `${CHAT_SYSTEM_PROMPT}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
+        : CHAT_SYSTEM_PROMPT;
+      const reply = await callGeminiChat(chatHistory, promptWithMemory) || 'No response.';
       chatHistory.push({ role: 'assistant', content: reply });
     }catch(e){
       chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
@@ -5509,6 +5580,7 @@
 
   initHubCardGlow();
   loadConversationList();
+  loadMemoryNotes();
 
   if(window.__GUEST_USERNAME__){
     document.title = window.__GUEST_USERNAME__ + "'s Hub";
