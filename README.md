@@ -56,7 +56,7 @@ npx wrangler deploy
 
 ## About the root-level files
 
-`CNAME`, `index.html`, `favicon.ico`, and `email-logo.png` also exist as copies at the repo root, outside the `Code/` folder — this is intentional, not leftover clutter. GitHub Pages serves from the repo root by default, and the Worker's public routes (`/favicon.ico`, `/email-logo.png`) are hardcoded to root-level paths too, since browsers and email clients request them directly without going through any folder. The organized copies inside `Code/` are for readability when browsing the repo; the root copies are what's actually being served live.
+`CNAME`, `index.html`, `README.md`, and `email-logo.png` also exist as copies at the repo root, outside the respective folder — this is intentional, not leftover clutter. GitHub Pages serves from the repo root by default, and the Worker's public routes (`/favicon.ico`, `/email-logo.png`) are hardcoded to root-level paths too, since browsers and email clients request them directly without going through any folder. The organized copies inside `Code/` are for readability when browsing the repo; the root copies are what's actually being served live.
 
 ## Credit
 
