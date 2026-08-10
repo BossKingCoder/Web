@@ -305,6 +305,29 @@
 
   /* ---- Body ---- */
   main{padding:56px 44px;max-width:1100px;margin:0 auto;min-height:60vh;}
+
+  /* ---- AI Assistant conversation sidebar ---- */
+  main.chat-with-sidebar{display:flex;gap:24px;align-items:flex-start;}
+  .chat-sidebar{
+    width:220px;flex-shrink:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:14px;max-height:640px;overflow-y:auto;
+  }
+  .new-chat-btn{
+    width:100%;background:var(--brass);color:var(--ink);border:none;
+    padding:10px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
+    margin-bottom:14px;transition:background .2s cubic-bezier(0.16,1,0.3,1);
+  }
+  .new-chat-btn:hover{background:var(--brass-soft);}
+  .chat-conv-item{
+    padding:10px 12px;border-radius:6px;margin-bottom:6px;cursor:pointer;
+    font-size:12.5px;color:var(--slate);border:1px solid transparent;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    transition:background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
+  .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-sidebar-empty{color:#6C7BA3;font-size:12px;padding:8px 4px;}
+  .chat-main-area{flex:1;min-width:0;}
   .view-head{margin-bottom:22px;}
   .view-head h2{font-size:34px;margin-bottom:8px;}
   .view-head .view-sub{font-size:13.5px;color:var(--slate-dim);}
@@ -773,6 +796,10 @@
     .chat-head{flex-wrap:wrap;}
     .riddle-buttons{flex-wrap:wrap;}
 
+    /* AI Assistant sidebar becomes a horizontal strip above the chat, not a side column */
+    main.chat-with-sidebar{flex-direction:column;}
+    .chat-sidebar{width:100%;max-height:140px;box-sizing:border-box;}
+
     /* Fixed-cell game grids shrink to fit narrow screens instead of overflowing */
     .calc-grid{grid-template-columns:repeat(4, minmax(0, 1fr));max-width:100%;}
     .calc-display{max-width:100%;}
@@ -883,18 +910,24 @@
 </div>
 
 <div class="view" id="view-chat">
-  <main>
-    <div class="view-head chat-head">
-      <div>
-        <h2>AI Assistant</h2>
-        <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
-      </div>
-      <button class="clear-btn" onclick="clearChat()">Clear chat</button>
+  <main class="chat-with-sidebar">
+    <div class="chat-sidebar">
+      <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+      <div class="chat-conv-list" id="chatConvList"></div>
     </div>
-    <div id="chatlog"></div>
-    <div class="chat-input-row">
-      <textarea id="chatInput" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
-      <button id="sendBtn" onclick="sendChat()">Send</button>
+    <div class="chat-main-area">
+      <div class="view-head chat-head">
+        <div>
+          <h2>AI Assistant</h2>
+          <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
+        </div>
+        <button class="clear-btn" onclick="deleteCurrentChat()">Delete chat</button>
+      </div>
+      <div id="chatlog"></div>
+      <div class="chat-input-row">
+        <textarea id="chatInput" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+        <button id="sendBtn" onclick="sendChat()">Send</button>
+      </div>
     </div>
   </main>
 </div>
@@ -2148,10 +2181,90 @@
 5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
 
   let chatHistory = [];
+  let currentConversationId = null;
+  let conversationList = [];
 
-  function clearChat(){
-    chatHistory = [];
+  function chatIdentity(){
+    return window.__GUEST_USERNAME__ || '';
+  }
+
+  async function loadConversationList(){
+    try{
+      const response = await fetch('/__ai_conv_list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      conversationList = Array.isArray(data.conversations) ? data.conversations : [];
+    }catch(e){ conversationList = []; }
+    renderConversationList();
+  }
+
+  function renderConversationList(){
+    const container = document.getElementById('chatConvList');
+    if(!container) return;
+    if(conversationList.length === 0){
+      container.innerHTML = '<div class="chat-sidebar-empty">No past chats yet.</div>';
+      return;
+    }
+    container.innerHTML = conversationList.map(c => `
+      <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
+        ${escapeHtml(c.title)}
+      </div>
+    `).join('');
+  }
+
+  async function openConversation(id){
+    try{
+      const response = await fetch('/__ai_conv_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+      const data = await response.json();
+      chatHistory = Array.isArray(data.messages) ? data.messages : [];
+    }catch(e){ chatHistory = []; }
+    currentConversationId = id;
     renderChat();
+    renderConversationList();
+  }
+
+  function startNewChat(){
+    chatHistory = [];
+    currentConversationId = null;
+    renderChat();
+    renderConversationList();
+  }
+
+  async function saveCurrentConversation(){
+    if(chatHistory.length === 0) return;
+    try{
+      const response = await fetch('/__ai_conv_save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: currentConversationId, messages: chatHistory })
+      });
+      const data = await response.json();
+      if(data.ok){
+        currentConversationId = data.id; // assigns the real id the first time a new chat is saved
+        await loadConversationList();
+      }
+    }catch(e){ /* saving is a courtesy — a failed save shouldn't interrupt the chat itself */ }
+  }
+
+  async function deleteCurrentChat(){
+    if(currentConversationId){
+      try{
+        await fetch('/__ai_conv_delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), id: currentConversationId })
+        });
+      }catch(e){ /* ignore */ }
+    }
+    startNewChat();
+    await loadConversationList();
   }
 
   /* ---- Focus Timer ---- */
@@ -2382,6 +2495,7 @@
     typingDiv.remove();
     renderChat();
     btn.disabled = false;
+    saveCurrentConversation();
   }
 
   /* ---- Snake ---- */
@@ -5394,9 +5508,10 @@
   }
 
   initHubCardGlow();
+  loadConversationList();
 
   if(window.__GUEST_USERNAME__){
-    document.title = window.__GUEST_USERNAME__ + "'s Workspace";
+    document.title = window.__GUEST_USERNAME__ + "'s Hub";
     updateFavicon(window.__GUEST_USERNAME__);
     document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
     typeWelcomeGuestSequence(window.__GUEST_USERNAME__);
