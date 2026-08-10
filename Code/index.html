@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0E1B3D">
 <link rel="icon" href="/favicon.ico" sizes="any">
-<title>Shaurya's Workspace</title>
+<title>Shaurya's Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -305,6 +305,41 @@
 
   /* ---- Body ---- */
   main{padding:56px 44px;max-width:1100px;margin:0 auto;min-height:60vh;}
+
+  /* ---- AI Assistant conversation sidebar ---- */
+  main.chat-with-sidebar{display:flex;gap:24px;align-items:flex-start;}
+  .chat-sidebar{
+    width:220px;flex-shrink:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:14px;max-height:640px;overflow-y:auto;
+  }
+  .new-chat-btn{
+    width:100%;background:var(--brass);color:var(--ink);border:none;
+    padding:10px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
+    margin-bottom:14px;transition:background .2s cubic-bezier(0.16,1,0.3,1);
+  }
+  .new-chat-btn:hover{background:var(--brass-soft);}
+  .chat-conv-item{
+    padding:10px 12px;border-radius:6px;margin-bottom:6px;cursor:pointer;
+    font-size:12.5px;color:var(--slate);border:1px solid transparent;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    transition:background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
+  .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-sidebar-empty{color:#6C7BA3;font-size:12px;padding:8px 4px;}
+  .chat-conv-list{margin-bottom:4px;}
+  .chat-memory-toggle{
+    margin-top:14px;padding-top:14px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--slate-dim);cursor:pointer;text-align:center;
+    transition:color .15s ease;
+  }
+  .chat-memory-toggle:hover{color:var(--brass-soft);}
+  .chat-memory-viewer{
+    display:none;margin-top:10px;padding:10px;background:var(--ink);border:1px solid var(--line);
+    border-radius:6px;font-size:11.5px;color:var(--slate);line-height:1.6;white-space:pre-wrap;
+  }
+  .chat-memory-viewer.visible{display:block;}
+  .chat-main-area{flex:1;min-width:0;}
   .view-head{margin-bottom:22px;}
   .view-head h2{font-size:34px;margin-bottom:8px;}
   .view-head .view-sub{font-size:13.5px;color:var(--slate-dim);}
@@ -773,6 +808,10 @@
     .chat-head{flex-wrap:wrap;}
     .riddle-buttons{flex-wrap:wrap;}
 
+    /* AI Assistant sidebar becomes a horizontal strip above the chat, not a side column */
+    main.chat-with-sidebar{flex-direction:column;}
+    .chat-sidebar{width:100%;max-height:140px;box-sizing:border-box;}
+
     /* Fixed-cell game grids shrink to fit narrow screens instead of overflowing */
     .calc-grid{grid-template-columns:repeat(4, minmax(0, 1fr));max-width:100%;}
     .calc-display{max-width:100%;}
@@ -790,7 +829,7 @@
 <body>
 
 <nav>
-  <div class="brand-name" id="brandName">Shaurya's Workspace</div>
+  <div class="brand-name" id="brandName">Shaurya's Hub</div>
   <div class="nav-search-wrap" id="globalSearchWrap">
     <input type="text" id="globalSearch" class="nav-search-input" placeholder="Search pages, formulas, vocab..." oninput="handleGlobalSearch()" onkeydown="if(event.key==='Escape') closeGlobalSearch();">
     <div class="nav-search-results" id="globalSearchResults"></div>
@@ -883,18 +922,26 @@
 </div>
 
 <div class="view" id="view-chat">
-  <main>
-    <div class="view-head chat-head">
-      <div>
-        <h2>AI Assistant</h2>
-        <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
-      </div>
-      <button class="clear-btn" onclick="clearChat()">Clear chat</button>
+  <main class="chat-with-sidebar">
+    <div class="chat-sidebar">
+      <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+      <div class="chat-conv-list" id="chatConvList"></div>
+      <div class="chat-memory-toggle" onclick="toggleMemoryViewer()">What I remember about you</div>
+      <div class="chat-memory-viewer" id="chatMemoryViewer"></div>
     </div>
-    <div id="chatlog"></div>
-    <div class="chat-input-row">
-      <textarea id="chatInput" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
-      <button id="sendBtn" onclick="sendChat()">Send</button>
+    <div class="chat-main-area">
+      <div class="view-head chat-head">
+        <div>
+          <h2>AI Assistant</h2>
+          <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
+        </div>
+        <button class="clear-btn" onclick="deleteCurrentChat()">Delete chat</button>
+      </div>
+      <div id="chatlog"></div>
+      <div class="chat-input-row">
+        <textarea id="chatInput" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+        <button id="sendBtn" onclick="sendChat()">Send</button>
+      </div>
     </div>
   </main>
 </div>
@@ -1748,7 +1795,7 @@
 <script>
   /* ---- View switching ---- */
   const BRAND_LABELS = {
-    welcome: "Shaurya's Workspace", home: "Home", chat: "AI Assistant", timer: "Focus Timer",
+    welcome: "Shaurya's Hub", home: "Home", chat: "AI Assistant", timer: "Focus Timer",
     study: "Study Hub", entertainment: "Entertainment Hub", riddles: "Riddles & Jokes",
     games: "Game Hub", snake: "Snake", game2048: "2048", puzzle15: "15 Puzzle", reaction: "Reaction Test",
     tictactoe: "Tic-Tac-Toe", wordchain: "Word Chain",
@@ -1911,7 +1958,7 @@
     const target = document.getElementById('view-' + view);
     if(!target || current === target) return;
 
-    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Workspace";
+    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Hub";
     const nav = NAV_TOGGLE[view];
     if(nav){
       const navEl = document.getElementById('navToggle');
@@ -2139,19 +2186,164 @@
   }
 
   /* ---- AI chat ---- */
-  const CHAT_SYSTEM_PROMPT = `You are a helpful, general-purpose assistant for Shaurya, a student at Wallington County Grammar School. Follow these rules:
+  function getUserDisplayName(){
+    if(window.__GUEST_USERNAME__){
+      return window.__GUEST_FIRST_NAME__ || window.__GUEST_USERNAME__;
+    }
+    return 'Shaurya';
+  }
 
-1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless Shaurya specifically wants technical depth.
+  function buildChatSystemPrompt(){
+    const name = getUserDisplayName();
+    const schoolContext = window.__GUEST_USERNAME__ ? '' : ', a student at Wallington County Grammar School';
+    return `You are a helpful, general-purpose assistant for ${name}${schoolContext}. Follow these rules:
+
+1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless ${name} specifically wants technical depth.
 2. Give simplified explanations by default. Break things down into their basic idea first.
-3. Do not just hand over the direct answer to a question straight away. Guide Shaurya toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless he explicitly asks you to just give him the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
-4. You are a general assistant, not exclusively a study tool — help with anything Shaurya brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
+3. Do not just hand over the direct answer to a question straight away. Guide ${name} toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless they explicitly ask you to just give them the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
+4. You are a general assistant, not exclusively a study tool — help with anything ${name} brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
 5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
+  }
 
   let chatHistory = [];
+  let currentConversationId = null;
+  let conversationList = [];
+  let userMemoryNotes = '';
 
-  function clearChat(){
-    chatHistory = [];
+  function chatIdentity(){
+    return window.__GUEST_USERNAME__ || '';
+  }
+
+  async function loadMemoryNotes(){
+    try{
+      const response = await fetch('/__ai_memory_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      userMemoryNotes = data.notes || '';
+    }catch(e){ userMemoryNotes = ''; }
+  }
+
+  function toggleMemoryViewer(){
+    const viewer = document.getElementById('chatMemoryViewer');
+    if(!viewer) return;
+    const isVisible = viewer.classList.contains('visible');
+    if(isVisible){
+      viewer.classList.remove('visible');
+      return;
+    }
+    viewer.textContent = userMemoryNotes.trim()
+      ? userMemoryNotes
+      : "Nothing remembered yet — it builds up as you chat.";
+    viewer.classList.add('visible');
+  }
+
+  // Called whenever a conversation is left behind (switching chats, or starting a
+  // new one) — asks the AI what's actually worth remembering from it, then saves
+  // that as a short note. Runs in the background; never blocks the UI on it.
+  async function extractAndSaveMemory(outgoingHistory){
+    if(!outgoingHistory || outgoingHistory.length < 2) return; // nothing meaningful to learn from a near-empty chat
+    try{
+      const extractionPrompt = `Based on this conversation, write 1-3 short, durable facts worth remembering about this user for future conversations (things like their subjects, ongoing projects, or how they like things explained) — not the specific questions they asked. Reply with just the facts, one per line, no preamble. If genuinely nothing durable stood out, reply with exactly: NONE`;
+      const summary = await callGeminiChat(outgoingHistory, extractionPrompt);
+      if(summary && summary.trim() && summary.trim().toUpperCase() !== 'NONE'){
+        await fetch('/__ai_memory_save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), notes: summary.trim() })
+        });
+        loadMemoryNotes(); // refresh so the very next message already benefits from it
+      }
+    }catch(e){ /* memory extraction is a courtesy — never let it disrupt the actual chat */ }
+  }
+
+  async function loadConversationList(){
+    try{
+      const response = await fetch('/__ai_conv_list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      conversationList = Array.isArray(data.conversations) ? data.conversations : [];
+    }catch(e){ conversationList = []; }
+    renderConversationList();
+  }
+
+  function renderConversationList(){
+    const container = document.getElementById('chatConvList');
+    if(!container) return;
+    if(conversationList.length === 0){
+      container.innerHTML = '<div class="chat-sidebar-empty">No past chats yet.</div>';
+      return;
+    }
+    container.innerHTML = conversationList.map(c => `
+      <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
+        ${escapeHtml(c.title)}
+      </div>
+    `).join('');
+  }
+
+  async function openConversation(id){
+    if(id === currentConversationId) return; // already there, nothing to switch away from
+    const outgoing = chatHistory;
+    extractAndSaveMemory(outgoing); // fire-and-forget — don't block switching on this
+
+    try{
+      const response = await fetch('/__ai_conv_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+      const data = await response.json();
+      chatHistory = Array.isArray(data.messages) ? data.messages : [];
+    }catch(e){ chatHistory = []; }
+    currentConversationId = id;
     renderChat();
+    renderConversationList();
+  }
+
+  function startNewChat(){
+    const outgoing = chatHistory;
+    if(currentConversationId !== null || outgoing.length > 0){
+      extractAndSaveMemory(outgoing); // fire-and-forget
+    }
+    chatHistory = [];
+    currentConversationId = null;
+    renderChat();
+    renderConversationList();
+  }
+
+  async function saveCurrentConversation(){
+    if(chatHistory.length === 0) return;
+    try{
+      const response = await fetch('/__ai_conv_save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: currentConversationId, messages: chatHistory })
+      });
+      const data = await response.json();
+      if(data.ok){
+        currentConversationId = data.id; // assigns the real id the first time a new chat is saved
+        await loadConversationList();
+      }
+    }catch(e){ /* saving is a courtesy — a failed save shouldn't interrupt the chat itself */ }
+  }
+
+  async function deleteCurrentChat(){
+    if(currentConversationId){
+      try{
+        await fetch('/__ai_conv_delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), id: currentConversationId })
+        });
+      }catch(e){ /* ignore */ }
+    }
+    startNewChat();
+    await loadConversationList();
   }
 
   /* ---- Focus Timer ---- */
@@ -2374,7 +2566,11 @@
     log.scrollTop = log.scrollHeight;
 
     try{
-      const reply = await callGeminiChat(chatHistory, CHAT_SYSTEM_PROMPT) || 'No response.';
+      const basePrompt = buildChatSystemPrompt();
+      const promptWithMemory = userMemoryNotes
+        ? `${basePrompt}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
+        : basePrompt;
+      const reply = await callGeminiChat(chatHistory, promptWithMemory) || 'No response.';
       chatHistory.push({ role: 'assistant', content: reply });
     }catch(e){
       chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
@@ -2382,6 +2578,7 @@
     typingDiv.remove();
     renderChat();
     btn.disabled = false;
+    saveCurrentConversation();
   }
 
   /* ---- Snake ---- */
@@ -5394,9 +5591,11 @@
   }
 
   initHubCardGlow();
+  loadConversationList();
+  loadMemoryNotes();
 
   if(window.__GUEST_USERNAME__){
-    document.title = window.__GUEST_USERNAME__ + "'s Workspace";
+    document.title = window.__GUEST_USERNAME__ + "'s Hub";
     updateFavicon(window.__GUEST_USERNAME__);
     document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
     typeWelcomeGuestSequence(window.__GUEST_USERNAME__);
