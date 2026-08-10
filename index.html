@@ -2186,13 +2186,24 @@
   }
 
   /* ---- AI chat ---- */
-  const CHAT_SYSTEM_PROMPT = `You are a helpful, general-purpose assistant for Shaurya, a student at Wallington County Grammar School. Follow these rules:
+  function getUserDisplayName(){
+    if(window.__GUEST_USERNAME__){
+      return window.__GUEST_FIRST_NAME__ || window.__GUEST_USERNAME__;
+    }
+    return 'Shaurya';
+  }
 
-1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless Shaurya specifically wants technical depth.
+  function buildChatSystemPrompt(){
+    const name = getUserDisplayName();
+    const schoolContext = window.__GUEST_USERNAME__ ? '' : ', a student at Wallington County Grammar School';
+    return `You are a helpful, general-purpose assistant for ${name}${schoolContext}. Follow these rules:
+
+1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless ${name} specifically wants technical depth.
 2. Give simplified explanations by default. Break things down into their basic idea first.
-3. Do not just hand over the direct answer to a question straight away. Guide Shaurya toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless he explicitly asks you to just give him the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
-4. You are a general assistant, not exclusively a study tool — help with anything Shaurya brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
+3. Do not just hand over the direct answer to a question straight away. Guide ${name} toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless they explicitly ask you to just give them the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
+4. You are a general assistant, not exclusively a study tool — help with anything ${name} brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
 5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
+  }
 
   let chatHistory = [];
   let currentConversationId = null;
@@ -2555,9 +2566,10 @@
     log.scrollTop = log.scrollHeight;
 
     try{
+      const basePrompt = buildChatSystemPrompt();
       const promptWithMemory = userMemoryNotes
-        ? `${CHAT_SYSTEM_PROMPT}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
-        : CHAT_SYSTEM_PROMPT;
+        ? `${basePrompt}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
+        : basePrompt;
       const reply = await callGeminiChat(chatHistory, promptWithMemory) || 'No response.';
       chatHistory.push({ role: 'assistant', content: reply });
     }catch(e){
