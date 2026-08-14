@@ -2597,18 +2597,33 @@
     log.appendChild(typingDiv);
     log.scrollTop = log.scrollHeight;
 
+    let streamingBodyEl = null;
+
     try{
       const basePrompt = buildChatSystemPrompt();
       const promptWithMemory = userMemoryNotes
         ? `${basePrompt}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
         : basePrompt;
-      const reply = await callGeminiChat(chatHistory, promptWithMemory) || 'No response.';
-      chatHistory.push({ role: 'assistant', content: reply });
+
+      const reply = await callGeminiChatStream(chatHistory, promptWithMemory, (partialText) => {
+        if(!streamingBodyEl){
+          typingDiv.remove();
+          const streamingDiv = document.createElement('div');
+          streamingDiv.className = 'msg assistant msg-in';
+          streamingDiv.innerHTML = `<div class="who">AI</div><div class="body"></div>`;
+          log.appendChild(streamingDiv);
+          streamingBodyEl = streamingDiv.querySelector('.body');
+        }
+        streamingBodyEl.textContent = partialText; // textContent, not innerHTML — safe by construction, no escaping needed
+        log.scrollTop = log.scrollHeight;
+      });
+
+      chatHistory.push({ role: 'assistant', content: reply || 'No response.' });
     }catch(e){
       chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
     }
-    typingDiv.remove();
-    renderChat();
+    if(typingDiv.parentNode) typingDiv.remove();
+    renderChat(); // final render replaces the temporary streaming bubble and adds the Regenerate button
     btn.disabled = false;
     saveCurrentConversation();
   }
@@ -3348,6 +3363,67 @@
     return (data.candidates && data.candidates[0] && data.candidates[0].content
       ? data.candidates[0].content.parts[0].text
       : '').trim();
+  }
+
+  // Streaming version, used only by the live chat UI so replies appear as they're
+  // generated rather than all at once. onChunk is called with the accumulated text
+  // so far every time a new piece arrives — Gemini sends incremental deltas, not
+  // the full text each time, so this function does the accumulating itself.
+  async function callGeminiChatStream(history, systemPrompt, onChunk){
+    const contents = history.map(m => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    }));
+    const body = { model: "gemini-3.1-flash-lite", contents, stream: true };
+    if(systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+
+    const response = await fetch(GEMINI_PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    if(!response.body){
+      // Streaming unsupported in this environment — fall back to a single read
+      const data = await response.json();
+      const fullText = (data.candidates && data.candidates[0] && data.candidates[0].content
+        ? data.candidates[0].content.parts[0].text
+        : '').trim();
+      if(fullText) onChunk(fullText);
+      return fullText;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // an incomplete trailing line waits for the next chunk
+
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        const jsonStr = line.slice(6).trim();
+        if(!jsonStr) continue;
+        try{
+          const parsed = JSON.parse(jsonStr);
+          const piece = parsed.candidates && parsed.candidates[0] && parsed.candidates[0].content
+            && parsed.candidates[0].content.parts && parsed.candidates[0].content.parts[0]
+            ? parsed.candidates[0].content.parts[0].text
+            : '';
+          if(piece){
+            fullText += piece;
+            onChunk(fullText);
+          }
+        }catch(e){ /* an incomplete or non-JSON SSE line — safe to skip */ }
+      }
+    }
+    return fullText.trim();
   }
 
   // Kept as a thin alias so every existing call site (Excuse Generator, Which X, Vocab) keeps working unchanged
