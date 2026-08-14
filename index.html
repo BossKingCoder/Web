@@ -436,6 +436,25 @@
   }
 
   .msg.msg-in{animation:msgIn 0.35s ease;}
+  .msg-actions{margin-top:6px;}
+  .msg-action-btn{
+    background:none;border:none;color:var(--slate-dim);font-size:11px;cursor:pointer;
+    padding:2px 0;text-decoration:underline;transition:color .15s ease;
+  }
+  .msg-action-btn:hover{color:var(--brass-soft);}
+  .msg-edit-input{
+    width:100%;box-sizing:border-box;background:var(--ink);border:1px solid var(--line);
+    color:#F5F1E8;padding:8px 10px;border-radius:6px;font-size:13px;font-family:inherit;
+    resize:vertical;min-height:60px;margin-bottom:8px;
+  }
+  .msg-edit-actions{display:flex;gap:8px;}
+  .msg-edit-actions button{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;transition:border-color .15s ease, color .15s ease;
+  }
+  .msg-edit-actions button:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .msg-edit-actions button:first-child{background:var(--brass);color:var(--ink);border-color:var(--brass);font-weight:600;}
+  .msg-edit-actions button:first-child:hover{background:var(--brass-soft);}
   @keyframes msgIn{
     from{opacity:0;transform:translateY(8px);}
     to{opacity:1;transform:translateY(0);}
@@ -2542,7 +2561,15 @@
       const div = document.createElement('div');
       const isNewest = i === chatHistory.length - 1;
       div.className = 'msg ' + m.role + (isNewest ? ' msg-in' : '');
-      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'AI'}</div><div class="body">${escapeHtml(m.content)}</div>`;
+
+      let actionsHtml = '';
+      if(m.role === 'user'){
+        actionsHtml = `<div class="msg-actions"><button class="msg-action-btn" onclick="startEditMessage(${i})">Edit</button></div>`;
+      }else if(m.role === 'assistant' && isNewest){
+        actionsHtml = `<div class="msg-actions"><button class="msg-action-btn" onclick="regenerateLastResponse()">Regenerate</button></div>`;
+      }
+
+      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'AI'}</div><div class="body" id="msgBody${i}">${escapeHtml(m.content)}</div>${actionsHtml}`;
       log.appendChild(div);
     });
     log.scrollTop = log.scrollHeight;
@@ -2555,7 +2582,12 @@
     input.value = '';
     chatHistory.push({ role: 'user', content: text });
     renderChat();
+    await generateAssistantReply();
+  }
 
+  // Shared by Send, Regenerate, and Edit — all three end with "now get a fresh
+  // reply for whatever chatHistory currently looks like."
+  async function generateAssistantReply(){
     const btn = document.getElementById('sendBtn');
     btn.disabled = true;
     const log = document.getElementById('chatlog');
@@ -2579,6 +2611,40 @@
     renderChat();
     btn.disabled = false;
     saveCurrentConversation();
+  }
+
+  async function regenerateLastResponse(){
+    if(chatHistory.length === 0 || chatHistory[chatHistory.length - 1].role !== 'assistant') return;
+    chatHistory.pop();
+    renderChat();
+    await generateAssistantReply();
+  }
+
+  function startEditMessage(index){
+    const bodyEl = document.getElementById('msgBody' + index);
+    if(!bodyEl) return;
+    const original = chatHistory[index].content;
+    bodyEl.innerHTML = `
+      <textarea class="msg-edit-input" id="editInput${index}">${escapeHtml(original)}</textarea>
+      <div class="msg-edit-actions">
+        <button onclick="submitEditMessage(${index})">Save &amp; Regenerate</button>
+        <button onclick="renderChat()">Cancel</button>
+      </div>
+    `;
+    const editInput = document.getElementById('editInput' + index);
+    editInput.focus();
+    editInput.setSelectionRange(editInput.value.length, editInput.value.length);
+  }
+
+  async function submitEditMessage(index){
+    const input = document.getElementById('editInput' + index);
+    const newText = input.value.trim();
+    if(!newText) return;
+    // Discard this message and everything that came after it, then continue fresh from the edit
+    chatHistory = chatHistory.slice(0, index);
+    chatHistory.push({ role: 'user', content: newText });
+    renderChat();
+    await generateAssistantReply();
   }
 
   /* ---- Snake ---- */
