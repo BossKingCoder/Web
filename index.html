@@ -2598,6 +2598,41 @@
     log.scrollTop = log.scrollHeight;
 
     let streamingBodyEl = null;
+    let displayedText = '';  // what's actually shown on screen right now
+    let targetText = '';     // everything received from the network so far — may run ahead of what's displayed
+    let streamEnded = false;
+    let revealTimer = null;
+
+    function ensureBubble(){
+      if(streamingBodyEl) return;
+      typingDiv.remove();
+      const streamingDiv = document.createElement('div');
+      streamingDiv.className = 'msg assistant msg-in';
+      streamingDiv.innerHTML = `<div class="who">AI</div><div class="body"></div>`;
+      log.appendChild(streamingDiv);
+      streamingBodyEl = streamingDiv.querySelector('.body');
+    }
+
+    // Reveals text at a steady pace regardless of how bursty the network chunks
+    // are — a big chunk just queues up and gets drained smoothly instead of
+    // appearing all at once. Speeds up automatically if a backlog builds up, so
+    // display never falls far behind what's actually already arrived.
+    function startRevealLoop(){
+      if(revealTimer) return;
+      revealTimer = setInterval(() => {
+        if(displayedText.length < targetText.length){
+          const backlog = targetText.length - displayedText.length;
+          const charsPerTick = backlog > 80 ? 8 : backlog > 24 ? 3 : 1;
+          displayedText = targetText.slice(0, Math.min(displayedText.length + charsPerTick, targetText.length));
+          ensureBubble();
+          streamingBodyEl.textContent = displayedText; // textContent, not innerHTML — safe by construction, no escaping needed
+          log.scrollTop = log.scrollHeight;
+        }else if(streamEnded){
+          clearInterval(revealTimer);
+          revealTimer = null;
+        }
+      }, 20);
+    }
 
     try{
       const basePrompt = buildChatSystemPrompt();
@@ -2606,22 +2641,28 @@
         : basePrompt;
 
       const reply = await callGeminiChatStream(chatHistory, promptWithMemory, (partialText) => {
-        if(!streamingBodyEl){
-          typingDiv.remove();
-          const streamingDiv = document.createElement('div');
-          streamingDiv.className = 'msg assistant msg-in';
-          streamingDiv.innerHTML = `<div class="who">AI</div><div class="body"></div>`;
-          log.appendChild(streamingDiv);
-          streamingBodyEl = streamingDiv.querySelector('.body');
-        }
-        streamingBodyEl.textContent = partialText; // textContent, not innerHTML — safe by construction, no escaping needed
-        log.scrollTop = log.scrollHeight;
+        targetText = partialText;
+        ensureBubble();
+        startRevealLoop();
       });
+      streamEnded = true;
 
       chatHistory.push({ role: 'assistant', content: reply || 'No response.' });
     }catch(e){
+      streamEnded = true;
       chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
     }
+
+    // Let the reveal loop actually finish catching up before showing the final rendered message
+    await new Promise(resolve => {
+      const waitForCatchUp = setInterval(() => {
+        if(displayedText.length >= targetText.length){
+          clearInterval(waitForCatchUp);
+          resolve();
+        }
+      }, 20);
+    });
+
     if(typingDiv.parentNode) typingDiv.remove();
     renderChat(); // final render replaces the temporary streaming bubble and adds the Regenerate button
     btn.disabled = false;
