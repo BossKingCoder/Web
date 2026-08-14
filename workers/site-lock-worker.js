@@ -1,3 +1,4 @@
+
 import { DurableObject } from "cloudflare:workers";
 
 const HUB_OPTIONS = [
@@ -24,6 +25,88 @@ async function getOwnerCredentials(env) {
 async function isOwner(env, username, password) {
   const creds = await getOwnerCredentials(env);
   return username === creds.username && password === creds.password;
+}
+
+// A real guest username could theoretically collide with something like "Shaurya"
+// if the owner ever created a guest with that name, so the owner's own AI chat
+// history uses a distinct reserved key instead of their display name.
+function aiHistoryKey(username) {
+  const trimmed = (username || '').trim();
+  return trimmed ? trimmed : '__owner__';
+}
+
+async function deleteAllAiConversations(env, username) {
+  const key = aiHistoryKey(username);
+  const list = await env.GUEST_KV.list({ prefix: 'ai_conv:' + key + ':' });
+  for (const k of list.keys) {
+    await env.GUEST_KV.delete(k.name);
+  }
+  await env.GUEST_KV.delete('ai_conv_index:' + key);
+  await env.GUEST_KV.delete('ai_memory:' + key);
+}
+
+// Shared helper for all guest-facing lifecycle emails — granted, denied, revoked,
+// deleted, and hub-shutdown notices. No-ops quietly if there's no email to send to.
+// Wraps any email's inner content in a consistently branded, table-based HTML shell.
+// Table layout + inline styles throughout — the only approach that renders reliably
+// across Gmail, Outlook, and Apple Mail, none of which handle modern CSS well.
+function wrapEmailHtml(innerHtml) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0E1B3D;padding:40px 16px;">
+  <tr><td align="center">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:420px;background-color:#16234F;border-radius:10px;overflow:hidden;">
+      <tr><td style="padding:28px 32px;text-align:center;border-bottom:1px solid #243466;">
+        <img src="https://shauryashub.dev/email-logo.png" alt="Shaurya's Hub" width="220" style="display:block;margin:0 auto;max-width:220px;height:auto;">
+      </td></tr>
+      <tr><td style="padding:32px;color:#F5F1E8;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;">
+        ${innerHtml}
+      </td></tr>
+      <tr><td style="padding:18px 32px;border-top:1px solid #243466;text-align:center;">
+        <span style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#6C7BA3;">Sent from shauryashub.dev</span>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>`;
+}
+
+async function sendNotificationEmail(env, toEmail, subject, text, html) {
+  if (!toEmail) return;
+  try {
+    await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
+        to: toEmail,
+        subject,
+        text,
+        html: wrapEmailHtml(html),
+      }),
+    });
+  } catch (e) {
+    // Notification emails are a courtesy, not critical — a failed send here
+    // shouldn't block the actual action (revoke/delete/etc.) from completing.
+  }
+}
+
+// Emails every guest who left an address, whenever the hub closes — covers
+// both a manual maintenance toggle and the panic-button lockdown.
+async function notifyAllGuestsShutdown(env, message) {
+  const list = await env.GUEST_KV.list({ prefix: 'guest:' });
+  for (const key of list.keys) {
+    const raw = await env.GUEST_KV.get(key.name);
+    if (!raw) continue;
+    const guest = JSON.parse(raw);
+    if (!guest.email) continue;
+    await sendNotificationEmail(
+      env, guest.email,
+      "Shaurya's Hub is temporarily closed",
+      `The hub has been temporarily closed.${message ? ' ' + message : ''}`,
+      `<p>The hub has been temporarily closed.${message ? ' ' + escapeHtml(message) : ''}</p>`
+    );
+  }
 }
 
 // A Durable Object: unlike the rest of this Worker, this stays alive between
@@ -321,6 +404,27 @@ export default {
       return fetch(request);
     }
 
+    // Email clients load this directly when rendering emails — they can't log in,
+    // so it needs to be public too. Nothing sensitive in a logo image.
+    if (url.pathname === '/email-logo.png') {
+      return fetch(request);
+    }
+
+    if (url.pathname === '/robots.txt') {
+      return new Response('User-agent: *\nAllow: /\nAllow: /signup\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+    }
+
+    if (url.pathname === '/signup') {
+      return handleSignup(request, env);
+    }
+
+    if (url.pathname === '/signup/verify' && request.method === 'POST') {
+      return handleSignupVerify(request, env);
+    }
+
     if (url.pathname === '/__chat_ws') {
       const upgradeHeader = request.headers.get('Upgrade');
       if (!upgradeHeader || upgradeHeader !== 'websocket') {
@@ -458,6 +562,108 @@ export default {
       return new Response('ok', { status: 200 });
     }
 
+    if (url.pathname === '/__ai_conv_list' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const raw = await env.GUEST_KV.get('ai_conv_index:' + key);
+      const index = raw ? JSON.parse(raw) : [];
+      index.sort((a, b) => b.updatedAt - a.updatedAt);
+      return new Response(JSON.stringify({ conversations: index }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_load' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      const raw = id ? await env.GUEST_KV.get('ai_conv:' + key + ':' + id) : null;
+      const messages = raw ? JSON.parse(raw).messages : [];
+      return new Response(JSON.stringify({ messages }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_save' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const messages = Array.isArray(body.messages) ? body.messages.slice(-200) : [];
+      const id = body.id || crypto.randomUUID();
+
+      const firstUserMsg = messages.find(m => m.role === 'user');
+      const title = firstUserMsg
+        ? (firstUserMsg.content.length > 40 ? firstUserMsg.content.slice(0, 40) + '…' : firstUserMsg.content)
+        : 'New chat';
+
+      await env.GUEST_KV.put('ai_conv:' + key + ':' + id, JSON.stringify({ messages }));
+
+      const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+      const index = indexRaw ? JSON.parse(indexRaw) : [];
+      const existing = index.find(c => c.id === id);
+      const updatedAt = Date.now();
+      if (existing) {
+        existing.title = title;
+        existing.updatedAt = updatedAt;
+      } else {
+        index.push({ id, title, updatedAt });
+      }
+      await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
+
+      return new Response(JSON.stringify({ ok: true, id, title }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_delete' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      if (id) {
+        await env.GUEST_KV.delete('ai_conv:' + key + ':' + id);
+        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+        const index = indexRaw ? JSON.parse(indexRaw) : [];
+        const filtered = index.filter(c => c.id !== id);
+        await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(filtered));
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_memory_load' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const notes = await env.GUEST_KV.get('ai_memory:' + key);
+      return new Response(JSON.stringify({ notes: notes || '' }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_memory_save' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const newNotes = (body.notes || '').trim();
+      if (newNotes) {
+        const existing = (await env.GUEST_KV.get('ai_memory:' + key)) || '';
+        const combined = existing ? existing + '\n' + newNotes : newNotes;
+        // Cap total length — keep the most recent notes, trim from the oldest end
+        const capped = combined.length > 2000 ? combined.slice(combined.length - 2000) : combined;
+        await env.GUEST_KV.put('ai_memory:' + key, capped);
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_memory_delete' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      await env.GUEST_KV.delete('ai_memory:' + key);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     if (url.pathname === '/__admin_refresh' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const ownerUser = body.owner_username || '';
@@ -505,7 +711,7 @@ async function deliverDueCapsules(env) {
           to: capsule.email,
           subject: 'A message from your past self has arrived',
           text: capsule.message,
-          html: `<p>${escapeHtml(capsule.message).replace(/\n/g, '<br>')}</p>`,
+          html: wrapEmailHtml(`<p>${escapeHtml(capsule.message).replace(/\n/g, '<br>')}</p>`),
         }),
       });
       if (response.ok) {
@@ -538,8 +744,9 @@ async function handleMainSite(request, env) {
       const previewAs = formData.get('preview_as');
       if (previewAs) {
         const previewRaw = await env.GUEST_KV.get('guest:' + previewAs);
-        const allowedHubs = previewRaw ? (JSON.parse(previewRaw).allowedHubs || []) : [];
-        return serveSiteWithPoller(request, true, previewAs, allowedHubs);
+        const previewGuest = previewRaw ? JSON.parse(previewRaw) : null;
+        const allowedHubs = previewGuest ? (previewGuest.allowedHubs || []) : [];
+        return serveSiteWithPoller(request, true, previewAs, allowedHubs, previewGuest?.firstName, previewGuest?.lastName);
       }
       return serveSiteWithPoller(request, false);
     }
@@ -564,7 +771,7 @@ async function handleMainSite(request, env) {
         guest.accessCount = (guest.accessCount || 0) + 1;
         guest.lastAccess = new Date().toISOString();
         await env.GUEST_KV.put('guest:' + username, JSON.stringify(guest));
-        return serveSiteWithPoller(request, true, username, guest.allowedHubs);
+        return serveSiteWithPoller(request, true, username, guest.allowedHubs, guest.firstName, guest.lastName);
       }
     }
 
@@ -580,7 +787,7 @@ async function handleMainSite(request, env) {
   });
 }
 
-async function serveSiteWithPoller(request, isGuest, username, allowedHubs) {
+async function serveSiteWithPoller(request, isGuest, username, allowedHubs, firstName, lastName) {
   const originResponse = await fetch(request.url, { headers: request.headers });
 
   // Owner never gets kicked, so just pass the page through unmodified.
@@ -594,6 +801,8 @@ async function serveSiteWithPoller(request, isGuest, username, allowedHubs) {
 <script>
   window.__GUEST_USERNAME__ = ${JSON.stringify(username)};
   window.__GUEST_ALLOWED_HUBS__ = ${JSON.stringify(allowedHubs && allowedHubs.length ? allowedHubs : null)};
+  window.__GUEST_FIRST_NAME__ = ${JSON.stringify(firstName || null)};
+  window.__GUEST_LAST_NAME__ = ${JSON.stringify(lastName || null)};
 </script>
 <script>
 (function(){
@@ -618,6 +827,229 @@ function isGuestExpired(guest) {
   return !!(guest.expiresAt && Date.now() > new Date(guest.expiresAt).getTime());
 }
 
+async function generateUniqueUsername(env, firstName, lastName) {
+  // Strip anything that isn't a normal name character before it ever becomes
+  // part of a username — defense in depth, not just relying on escaping at render time.
+  const sanitize = (s) => s.trim().replace(/[^a-zA-Z0-9\s'-]/g, '').replace(/\s+/g, ' ');
+  const first = sanitize(firstName) || 'Guest';
+  const lastClean = sanitize(lastName);
+
+  const firstCapitalized = first.charAt(0).toUpperCase() + first.slice(1);
+  const lastInitial = lastClean ? lastClean.charAt(0).toUpperCase() : 'X';
+  const base = `${firstCapitalized}.${lastInitial}`;
+
+  let candidate = base;
+  let suffix = 2;
+  while (true) {
+    const existingGuest = await env.GUEST_KV.get('guest:' + candidate);
+    const existingRequest = await env.GUEST_KV.get('request:' + candidate);
+    if (!existingGuest && !existingRequest) return candidate;
+    candidate = base + suffix;
+    suffix++;
+  }
+}
+
+async function handleSignup(request, env) {
+  if (request.method === 'POST') {
+    const formData = await request.formData();
+    const firstName = (formData.get('first_name') || '').trim();
+    const lastName = (formData.get('last_name') || '').trim();
+    const email = (formData.get('email') || '').trim();
+
+    if (!firstName || !lastName) {
+      return new Response(signupPage('Please enter both your first and last name.'), {
+        status: 200, headers: { 'Content-Type': 'text/html' },
+      });
+    }
+
+    // No email given — nothing to verify, request goes through exactly like before.
+    if (!email) {
+      const username = await generateUniqueUsername(env, firstName, lastName);
+      await env.GUEST_KV.put('request:' + username, JSON.stringify({
+        firstName, lastName, username, email: null, requestedAt: new Date().toISOString(),
+      }));
+      return new Response(signupConfirmPage(username), {
+        status: 200, headers: { 'Content-Type': 'text/html' },
+      });
+    }
+
+    // Email given — hold the request and verify they actually own that inbox first.
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const token = crypto.randomUUID();
+    await env.GUEST_KV.put(
+      'pending_signup:' + token,
+      JSON.stringify({ firstName, lastName, email, otp, expiresAt: Date.now() + 15 * 60 * 1000 }),
+      { expirationTtl: 900 }
+    );
+
+    try {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
+          to: email,
+          subject: 'Confirm your email — Shaurya\'s Hub',
+          text: `Your verification code is: ${otp}\n\nThis code expires in 15 minutes. If you didn't request access to Shaurya's Hub, you can ignore this email.`,
+          html: wrapEmailHtml(`<p>Your verification code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#E0AC3F;">${otp}</p><p>This code expires in 15 minutes. If you didn't request access to Shaurya's Hub, you can ignore this email.</p>`),
+        }),
+      });
+    } catch (e) {
+      // Even if the email fails to send, still show the entry page — the field-hint
+      // and a resend option (implicit via going back and re-submitting) cover this.
+    }
+
+    return new Response(otpEntryPage(email, token), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  return new Response(signupPage(), {
+    status: 200, headers: { 'Content-Type': 'text/html' },
+  });
+}
+
+async function handleSignupVerify(request, env) {
+  const formData = await request.formData();
+  const token = formData.get('token') || '';
+  const otpInput = (formData.get('otp') || '').trim();
+
+  const raw = await env.GUEST_KV.get('pending_signup:' + token);
+  if (!raw) {
+    return new Response(signupPage('That verification link expired — please start again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  const pending = JSON.parse(raw);
+  if (Date.now() > pending.expiresAt) {
+    await env.GUEST_KV.delete('pending_signup:' + token);
+    return new Response(signupPage('That code expired — please start again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  if (otpInput !== pending.otp) {
+    return new Response(otpEntryPage(pending.email, token, 'That code didn\'t match — try again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  const username = await generateUniqueUsername(env, pending.firstName, pending.lastName);
+  await env.GUEST_KV.put('request:' + username, JSON.stringify({
+    firstName: pending.firstName, lastName: pending.lastName, username,
+    email: pending.email, requestedAt: new Date().toISOString(),
+  }));
+  await env.GUEST_KV.delete('pending_signup:' + token);
+
+  return new Response(signupConfirmPage(username), {
+    status: 200, headers: { 'Content-Type': 'text/html' },
+  });
+}
+
+function signupPage(error) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Request Access — Shaurya's Hub</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0E1B3D;font-family:sans-serif;}
+  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:300px;}
+  h1{color:#F5F1E8;font-size:20px;margin:0 0 8px 0;text-align:center;}
+  .sub{color:#8B9BC4;font-size:12.5px;text-align:center;margin-bottom:20px;line-height:1.5;}
+  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
+    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:14px;}
+  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
+    font-weight:600;cursor:pointer;font-size:14px;}
+  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
+  .field-hint{color:#6C7BA3;font-size:11px;margin-top:-8px;margin-bottom:12px;line-height:1.4;}
+  .back-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
+  .back-link:hover{color:#E0AC3F;}
+</style>
+</head>
+<body>
+  <form class="card" method="POST">
+    <h1>Request Access</h1>
+    <div class="sub">Ask for access to Shaurya's Hub — tell me who you are and I'll take a look.</div>
+    ${error ? `<div class="error">${error}</div>` : ''}
+    <input type="text" name="first_name" placeholder="First name" autofocus required>
+    <input type="text" name="last_name" placeholder="Last name" required>
+    <input type="email" name="email" placeholder="Email (optional)">
+    <div class="field-hint">If you leave your email, you'll get a note when your request is accepted or denied.</div>
+    <button type="submit">Send Request</button>
+    <a class="back-link" href="/">Back to sign in</a>
+  </form>
+</body>
+</html>`;
+}
+
+function otpEntryPage(email, token, error) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confirm Your Email — Shaurya's Hub</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0E1B3D;font-family:sans-serif;}
+  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:300px;}
+  h1{color:#F5F1E8;font-size:20px;margin:0 0 8px 0;text-align:center;}
+  .sub{color:#8B9BC4;font-size:12.5px;text-align:center;margin-bottom:20px;line-height:1.5;}
+  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
+    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:20px;text-align:center;letter-spacing:6px;}
+  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
+    font-weight:600;cursor:pointer;font-size:14px;}
+  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
+  .back-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
+  .back-link:hover{color:#E0AC3F;}
+</style>
+</head>
+<body>
+  <form class="card" method="POST" action="/signup/verify">
+    <h1>Confirm Your Email</h1>
+    <div class="sub">We sent a 6-digit code to <strong>${escapeHtml(email)}</strong> — enter it below.</div>
+    ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
+    <input type="hidden" name="token" value="${escapeHtml(token)}">
+    <input type="text" name="otp" placeholder="123456" inputmode="numeric" maxlength="6" autofocus required>
+    <button type="submit">Confirm</button>
+    <a class="back-link" href="/signup">Start over</a>
+  </form>
+</body>
+</html>`;
+}
+
+function signupConfirmPage(username) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Request Sent — Shaurya's Hub</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;text-align:center;padding:20px;}
+  .card{max-width:340px;}
+  h1{font-size:20px;color:#6FE0A0;margin-bottom:10px;}
+  p{color:#AEB9D4;font-size:14px;line-height:1.6;}
+  .username{color:#E0AC3F;font-weight:700;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Request Sent</h1>
+    <p>Your request has been sent. If it's approved, your username will be <span class="username">${escapeHtml(username)}</span> — check back or wait to hear from whoever you asked.</p>
+  </div>
+</body>
+</html>`;
+}
+
 async function handleAdmin(request, env) {
   if (request.method === 'POST') {
     const formData = await request.formData();
@@ -640,33 +1072,40 @@ async function handleAdmin(request, env) {
     let justCreated = null;
 
     if (action === 'create') {
-      const username = (formData.get('new_username') || '').trim();
-      if (!username) {
-        createError = 'Type a username first.';
+      const firstName = (formData.get('new_first_name') || '').trim();
+      const lastName = (formData.get('new_last_name') || '').trim();
+      if (!firstName || !lastName) {
+        createError = 'Enter both a first and last name first.';
       } else {
-        const existing = await env.GUEST_KV.get('guest:' + username);
-        if (existing) {
-          createError = `"${username}" is already taken — pick a different one.`;
-        } else {
-          const password = Math.random().toString(36).slice(2, 10);
+        const username = await generateUniqueUsername(env, firstName, lastName);
+        const password = Math.random().toString(36).slice(2, 10);
 
-          const expDay = formData.get('expire_day');
-          const expMonth = formData.get('expire_month');
-          const expYear = formData.get('expire_year');
-          let expiresAt = null;
-          if (expDay && expMonth && expYear) {
-            expiresAt = `${expYear}-${String(expMonth).padStart(2, '0')}-${String(expDay).padStart(2, '0')}T23:59:59`;
-          }
-
-          const allowedHubs = formData.getAll('allowed_hub'); // empty array = no restriction, full access
-
-          const record = {
-            password, active: true, accessCount: 0, createdAt: new Date().toISOString(),
-            expiresAt, allowedHubs: allowedHubs.length ? allowedHubs : null,
-          };
-          await env.GUEST_KV.put('guest:' + username, JSON.stringify(record));
-          justCreated = { username, ...record };
+        const expDay = formData.get('expire_day');
+        const expMonth = formData.get('expire_month');
+        const expYear = formData.get('expire_year');
+        let expiresAt = null;
+        if (expDay && expMonth && expYear) {
+          expiresAt = `${expYear}-${String(expMonth).padStart(2, '0')}-${String(expDay).padStart(2, '0')}T23:59:59`;
         }
+
+        const allowedHubs = formData.getAll('allowed_hub'); // empty array = no restriction, full access
+        const email = (formData.get('new_email') || '').trim();
+
+        const record = {
+          password, active: true, accessCount: 0, createdAt: new Date().toISOString(),
+          expiresAt, allowedHubs: allowedHubs.length ? allowedHubs : null, email: email || null,
+          firstName, lastName,
+        };
+        await env.GUEST_KV.put('guest:' + username, JSON.stringify(record));
+        justCreated = { username, ...record };
+
+        const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
+          await sendNotificationEmail(
+            env, email,
+            "You've been given access to Shaurya's Hub",
+            `You've been given access to Shaurya's Hub.\n\nWebsite: https://${sendDomain}\nUsername: ${username}\nPassword: ${password}\n\nThis access can be revoked at any time.`,
+            `<p>You've been given access to Shaurya's Hub.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(username)}</strong><br>Password: <strong>${escapeHtml(password)}</strong></p><p>This access can be revoked at any time.</p>`
+          );
       }
     } else if (action === 'toggle') {
       const target = formData.get('target');
@@ -675,16 +1114,38 @@ async function handleAdmin(request, env) {
         const guest = JSON.parse(raw);
         guest.active = !guest.active;
         await env.GUEST_KV.put('guest:' + target, JSON.stringify(guest));
+        if (!guest.active) {
+          await sendNotificationEmail(
+            env, guest.email,
+            'Your access to Shaurya\'s Hub has been revoked',
+            'Your access has been revoked. If you think this was a mistake, feel free to reach out.',
+            '<p>Your access has been revoked. If you think this was a mistake, feel free to reach out.</p>'
+          );
+        }
       }
     } else if (action === 'delete') {
       const target = formData.get('target');
+      const raw = await env.GUEST_KV.get('guest:' + target);
+      if (raw) {
+        const guest = JSON.parse(raw);
+        await sendNotificationEmail(
+          env, guest.email,
+          'Your account on Shaurya\'s Hub has been deleted',
+          'Your account has been permanently deleted.',
+          '<p>Your account has been permanently deleted.</p>'
+        );
+      }
       await env.GUEST_KV.delete('guest:' + target);
+      await deleteAllAiConversations(env, target);
     } else if (action === 'toggle_maintenance') {
       const raw = await env.GUEST_KV.get('site:maintenance');
       const current = raw ? JSON.parse(raw) : { enabled: false, message: '' };
       const newEnabled = !current.enabled;
       const message = newEnabled ? (formData.get('maintenance_message') || '').trim() : current.message;
       await env.GUEST_KV.put('site:maintenance', JSON.stringify({ enabled: newEnabled, message }));
+      if (newEnabled) {
+        await notifyAllGuestsShutdown(env, message);
+      }
     } else if (action === 'request_panic') {
       const token = crypto.randomUUID();
       await env.GUEST_KV.put(
@@ -700,11 +1161,11 @@ async function handleAdmin(request, env) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            from: `Shaurya's Workspace <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
+            from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
             to: env.OWNER_EMAIL,
             subject: 'Confirm emergency lockdown',
             text: `A panic lockdown was requested for your admin panel.\n\nOpen this link to review and confirm: https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-panic?token=${token}\n\nThis link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.`,
-            html: `<p>A panic lockdown was requested for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-panic?token=${token}">Click here to review and confirm</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`,
+            html: wrapEmailHtml(`<p>A panic lockdown was requested for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-panic?token=${token}" style="color:#E0AC3F;">Click here to review and confirm</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`),
           }),
         });
         panicStatus = { ok: true, text: `Confirmation email sent to ${env.OWNER_EMAIL}. Open it to review and confirm — nothing happens until then.` };
@@ -730,11 +1191,11 @@ async function handleAdmin(request, env) {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              from: `Shaurya's Workspace <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
+              from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
               to: env.OWNER_EMAIL,
               subject: 'Confirm your password change',
               text: `Someone (hopefully you) requested a password change for your admin panel.\n\nClick to confirm: https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-password?token=${token}\n\nThis link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.`,
-              html: `<p>Someone (hopefully you) requested a password change for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-password?token=${token}">Click here to confirm the change</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`,
+              html: wrapEmailHtml(`<p>Someone (hopefully you) requested a password change for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-password?token=${token}" style="color:#E0AC3F;">Click here to confirm the change</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`),
             }),
           });
           passwordChangeStatus = { ok: true, text: `Confirmation email sent to ${env.OWNER_EMAIL}. Click the link there to finish the change.` };
@@ -742,6 +1203,42 @@ async function handleAdmin(request, env) {
           passwordChangeStatus = { ok: false, text: 'Could not send the confirmation email — try again.' };
         }
       }
+    } else if (action === 'accept_request') {
+      const target = formData.get('target');
+      const raw = await env.GUEST_KV.get('request:' + target);
+      if (raw) {
+        const req = JSON.parse(raw);
+        const password = Math.random().toString(36).slice(2, 10);
+        const record = {
+          password, active: true, accessCount: 0, createdAt: new Date().toISOString(),
+          expiresAt: null, allowedHubs: null, email: req.email || null,
+          firstName: req.firstName || null, lastName: req.lastName || null,
+        };
+        await env.GUEST_KV.put('guest:' + target, JSON.stringify(record));
+        await env.GUEST_KV.delete('request:' + target);
+        justCreated = { username: target, ...record };
+
+        const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
+        await sendNotificationEmail(
+          env, req.email,
+          "You've been granted access to Shaurya's Hub",
+          `Good news — your access request was accepted.\n\nWebsite: https://${sendDomain}\nUsername: ${target}\nPassword: ${password}\n\nThis access can be revoked at any time.`,
+          `<p>Good news — your access request was accepted.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(target)}</strong><br>Password: <strong>${escapeHtml(password)}</strong></p><p>This access can be revoked at any time.</p>`
+        );
+      }
+    } else if (action === 'deny_request') {
+      const target = formData.get('target');
+      const raw = await env.GUEST_KV.get('request:' + target);
+      if (raw) {
+        const req = JSON.parse(raw);
+        await sendNotificationEmail(
+          env, req.email,
+          'Your access request was not approved',
+          `Your request for access to Shaurya's Hub wasn't approved this time.`,
+          `<p>Your request for access to Shaurya's Hub wasn't approved this time.</p>`
+        );
+      }
+      await env.GUEST_KV.delete('request:' + target);
     }
 
     return new Response(await adminPanelPage(env, ownerUser, ownerPass, createError, justCreated, emailStatus, panicStatus, passwordChangeStatus), {
@@ -796,10 +1293,10 @@ async function handleAdminEmail(request, env) {
     const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
     const displayName = fromChoice === 'shaurya' ? 'Shaurya' : 'Anonymous';
 
-    const baseText = `You've been given temporary access to Shaurya's Workspace.\n\nWebsite: https://${sendDomain}\nUsername: ${target}\nPassword: ${guest.password}\n\nThis access can be revoked at any time.`;
+    const baseText = `You've been given temporary access to Shaurya's Hub.\n\nWebsite: https://${sendDomain}\nUsername: ${target}\nPassword: ${guest.password}\n\nThis access can be revoked at any time.`;
     const fullText = extraMessage ? `${baseText}\n\n---\n${extraMessage}` : baseText;
 
-    const baseHtml = `<p>You've been given temporary access to <strong>Shaurya's Workspace</strong>.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(target)}</strong><br>Password: <strong>${escapeHtml(guest.password)}</strong></p><p>This access can be revoked at any time.</p>`;
+    const baseHtml = `<p>You've been given temporary access to <strong>Shaurya's Hub</strong>.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(target)}</strong><br>Password: <strong>${escapeHtml(guest.password)}</strong></p><p>This access can be revoked at any time.</p>`;
     const fullHtml = extraMessage
       ? `${baseHtml}<hr>${escapeHtml(extraMessage).replace(/\n/g, '<br>')}`
       : baseHtml;
@@ -814,9 +1311,9 @@ async function handleAdminEmail(request, env) {
         body: JSON.stringify({
           from: `${displayName} <access@${sendDomain}>`,
           to,
-          subject: "You've been given access to Shaurya's Workspace",
+          subject: "You've been given access to Shaurya's Hub",
           text: fullText,
-          html: fullHtml,
+          html: wrapEmailHtml(fullHtml),
         }),
       });
       const result = await response.json();
@@ -943,10 +1440,12 @@ async function handleConfirmPanic(request, env) {
       guest.active = false;
       await env.GUEST_KV.put(key.name, JSON.stringify(guest));
     }
+    const lockdownMessage = 'Access has been temporarily locked down.';
     await env.GUEST_KV.put('site:maintenance', JSON.stringify({
       enabled: true,
-      message: 'Access has been temporarily locked down.',
+      message: lockdownMessage,
     }));
+    await notifyAllGuestsShutdown(env, lockdownMessage);
     await env.GUEST_KV.delete('panic:pending');
 
     return new Response(confirmResultPage(true, 'Every guest login has been revoked and the workspace is now closed.', 'Lockdown Confirmed'), {
@@ -1116,6 +1615,46 @@ function emailSentPage(ownerUser, ownerPass, to) {
 </html>`;
 }
 
+async function buildRequestRowsHtml(env, ownerUser, ownerPass) {
+  const list = await env.GUEST_KV.list({ prefix: 'request:' });
+  if (list.keys.length === 0) {
+    return `<tr><td colspan="4" style="color:#6C7BA3;">No pending requests.</td></tr>`;
+  }
+
+  const rows = await Promise.all(list.keys.map(async (key) => {
+    const raw = await env.GUEST_KV.get(key.name);
+    if (!raw) return '';
+    const req = JSON.parse(raw);
+    const requestedAgo = new Date(req.requestedAt).toLocaleString();
+
+    return `
+      <tr>
+        <td>${escapeHtml(req.firstName)} ${escapeHtml(req.lastName)}</td>
+        <td>${escapeHtml(req.username)}</td>
+        <td>${escapeHtml(requestedAgo)}</td>
+        <td>
+          <form method="POST" style="display:inline;">
+            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
+            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
+            <input type="hidden" name="action" value="accept_request">
+            <input type="hidden" name="target" value="${escapeHtml(req.username)}">
+            <button type="submit" class="small-btn">Accept</button>
+          </form>
+          <form method="POST" style="display:inline;">
+            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
+            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
+            <input type="hidden" name="action" value="deny_request">
+            <input type="hidden" name="target" value="${escapeHtml(req.username)}">
+            <button type="submit" class="small-btn danger">Deny</button>
+          </form>
+        </td>
+      </tr>
+    `;
+  }));
+
+  return rows.join('');
+}
+
 async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
   const list = await env.GUEST_KV.list({ prefix: 'guest:' });
   let rows = '';
@@ -1132,13 +1671,19 @@ async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
 
   async function buildRow(username, guest) {
     const activityRaw = await env.GUEST_KV.get('activity:' + username);
-    let presenceHtml = '<span style="color:#6C7BA3;">Never accessed</span>';
+    let presenceHtml;
     if (activityRaw) {
       const activity = JSON.parse(activityRaw);
       const diff = Date.now() - activity.timestamp;
       presenceHtml = diff < 15000
         ? `<span style="color:#6FE0A0;">&#9679; Online &mdash; ${escapeHtml(activity.view || 'unknown page')}</span>`
         : `<span style="color:#6C7BA3;">Last seen ${formatTimeAgo(diff)}</span>`;
+    } else if (guest.accessCount > 0) {
+      // Their short-lived presence entry expired (5 min TTL), but they have
+      // genuinely logged in before — "never accessed" would be misleading here.
+      presenceHtml = '<span style="color:#6C7BA3;">Not currently online</span>';
+    } else {
+      presenceHtml = '<span style="color:#6C7BA3;">Never accessed</span>';
     }
 
     const expired = isGuestExpired(guest);
@@ -1157,8 +1702,8 @@ async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
 
     return `
       <tr>
-        <td>${username}</td>
-        <td>${guest.password}</td>
+        <td>${escapeHtml(username)}</td>
+        <td>${escapeHtml(guest.password)}</td>
         <td>${guest.accessCount || 0}</td>
         <td>${presenceHtml}</td>
         <td>${expiresHtml}</td>
@@ -1169,26 +1714,26 @@ async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
             <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
             <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
             <input type="hidden" name="action" value="toggle">
-            <input type="hidden" name="target" value="${username}">
+            <input type="hidden" name="target" value="${escapeHtml(username)}">
             <button type="submit" class="small-btn">${guest.active ? 'Revoke' : 'Reactivate'}</button>
           </form>
           <form method="POST" action="/admin" style="display:inline;">
             <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
             <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
             <input type="hidden" name="action" value="delete">
-            <input type="hidden" name="target" value="${username}">
+            <input type="hidden" name="target" value="${escapeHtml(username)}">
             <button type="submit" class="small-btn danger">Delete</button>
           </form>
           <form method="POST" action="/admin/email" style="display:inline;">
             <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
             <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="target" value="${username}">
+            <input type="hidden" name="target" value="${escapeHtml(username)}">
             <button type="submit" class="small-btn">Email</button>
           </form>
           <form method="POST" action="/" target="_blank" style="display:inline;">
             <input type="hidden" name="username" value="${escapeHtml(ownerUser)}">
             <input type="hidden" name="password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="preview_as" value="${username}">
+            <input type="hidden" name="preview_as" value="${escapeHtml(username)}">
             <button type="submit" class="small-btn">Preview</button>
           </form>
         </td>
@@ -1220,6 +1765,7 @@ async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
 
 async function adminPanelPage(env, ownerUser, ownerPass, createError, justCreated, emailStatus, panicStatus, passwordChangeStatus) {
   const rows = await buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated);
+  const requestRows = await buildRequestRowsHtml(env, ownerUser, ownerPass);
   const maintenanceRaw = await env.GUEST_KV.get('site:maintenance');
   const maintenance = maintenanceRaw ? JSON.parse(maintenanceRaw) : { enabled: false, message: '' };
 
@@ -1244,9 +1790,9 @@ async function adminPanelPage(env, ownerUser, ownerPass, createError, justCreate
   .small-btn.danger:hover{border-color:#D9584F;color:#D9584F;}
   .small-btn:hover{border-color:#E0AC3F;}
   form.create{background:#16234F;border-radius:8px;padding:20px;}
-  form.create input[type="text"]{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
+  form.create input[type="text"], form.create input[type="email"]{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
     padding:10px 12px;border-radius:6px;font-size:14px;flex:1;min-width:160px;}
-  form.create input[type="text"]:focus{outline:none;border-color:#E0AC3F;}
+  form.create input[type="text"]:focus, form.create input[type="email"]:focus{outline:none;border-color:#E0AC3F;}
   .create-subsection-label{font-size:12px;color:#6C7BA3;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em;}
   .compose-field-select{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
     padding:8px 10px;border-radius:6px;font-size:13px;flex:1;}
@@ -1268,6 +1814,15 @@ async function adminPanelPage(env, ownerUser, ownerPass, createError, justCreate
 </head>
 <body>
   <div class="wrap">
+    <h1>Request Access</h1>
+    <div class="sub">People who've asked for a login via /signup — accept to create their account, deny to dismiss.</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>Name</th><th>Username</th><th>Requested</th><th>Actions</th></tr></thead>
+        <tbody id="requestRows">${requestRows}</tbody>
+      </table>
+    </div>
+
     <h1>Guest Access</h1>
     <div class="sub">Create temporary logins for friends, see how many times they've used it, revoke anytime.</div>
     <div style="overflow-x:auto;">
@@ -1282,7 +1837,10 @@ async function adminPanelPage(env, ownerUser, ownerPass, createError, justCreate
       <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
       <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
       <input type="hidden" name="action" value="create">
-      <input type="text" name="new_username" placeholder="Choose a username" required style="width:100%;box-sizing:border-box;margin-bottom:14px;">
+      <input type="text" name="new_first_name" placeholder="First name" required style="width:100%;box-sizing:border-box;margin-bottom:14px;">
+      <input type="text" name="new_last_name" placeholder="Last name" required style="width:100%;box-sizing:border-box;margin-bottom:14px;">
+      <input type="email" name="new_email" placeholder="Email (optional)" style="width:100%;box-sizing:border-box;margin-bottom:6px;">
+      <div style="color:#6C7BA3;font-size:11px;margin-bottom:14px;line-height:1.4;">If set, they'll get notified about access changes and hub shutdowns.</div>
 
       <div class="create-subsection-label">Auto-expire (optional — leave blank to never expire)</div>
       <div style="display:flex;gap:8px;margin-bottom:16px;">
@@ -1399,7 +1957,7 @@ function maintenancePage(message) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shaurya's Workspace — Temporarily Closed</title>
+<title>Shaurya's Hub — Temporarily Closed</title>
 <style>
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
     background:#0E1B3D;font-family:sans-serif;text-align:center;padding:20px;}
@@ -1419,11 +1977,18 @@ function maintenancePage(message) {
 
 function loginPage(error) {
   return `<!DOCTYPE html>
-<html>
+<html lang="en-GB">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shaurya's Workspace — Sign In</title>
+<title>Shaurya's Hub — Sign In</title>
+<meta name="description" content="Shaurya's Hub — a personal workspace with study tools, games, an AI assistant, and live multiplayer, built by Shaurya Kshitij.">
+<meta property="og:title" content="Shaurya's Hub">
+<meta property="og:description" content="A personal workspace with study tools, games, an AI assistant, and live multiplayer.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://shauryashub.dev">
+<meta name="theme-color" content="#0E1B3D">
+<link rel="icon" href="/favicon.ico" sizes="any">
 <style>
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
     background:#0E1B3D;font-family:sans-serif;}
@@ -1434,15 +1999,18 @@ function loginPage(error) {
   button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
     font-weight:600;cursor:pointer;font-size:14px;}
   .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
+  .request-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
+  .request-link:hover{color:#E0AC3F;}
 </style>
 </head>
 <body>
   <form class="card" method="POST">
-    <h1>Shaurya's Workspace</h1>
+    <h1>Shaurya's Hub</h1>
     ${error ? `<div class="error">${error}</div>` : ''}
     <input type="text" name="username" placeholder="Username" autofocus required>
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Enter</button>
+    <a class="request-link" href="/signup">Don't have access? Request it</a>
   </form>
 </body>
 </html>`;
