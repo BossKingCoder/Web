@@ -1,6 +1,6 @@
 {
   "name": "site-lock",
-  "main": "../workers/site-lock-worker.js",
+  "main": "workers/site-lock-worker.js",
   "compatibility_date": "2026-01-01",
   "kv_namespaces": [
     { "binding": "GUEST_KV", "id": "910f4f4c993a43b29aadb4aca415e0dc" }
