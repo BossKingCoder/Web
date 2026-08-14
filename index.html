@@ -336,9 +336,16 @@
   .chat-memory-toggle:hover{color:var(--brass-soft);}
   .chat-memory-viewer{
     display:none;margin-top:10px;padding:10px;background:var(--ink);border:1px solid var(--line);
-    border-radius:6px;font-size:11.5px;color:var(--slate);line-height:1.6;white-space:pre-wrap;
+    border-radius:6px;font-size:11.5px;color:var(--slate);line-height:1.6;
   }
   .chat-memory-viewer.visible{display:block;}
+  .chat-memory-text{white-space:pre-wrap;margin-bottom:10px;}
+  .chat-memory-forget-btn{
+    width:100%;background:none;border:1px solid var(--accent-red);color:var(--accent-red);
+    padding:6px;border-radius:6px;font-size:11px;cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-memory-forget-btn:hover{background:var(--accent-red);color:#F5F1E8;}
   .chat-main-area{flex:1;min-width:0;}
   .view-head{margin-bottom:22px;}
   .view-head h2{font-size:34px;margin-bottom:8px;}
@@ -2253,10 +2260,29 @@
       viewer.classList.remove('visible');
       return;
     }
-    viewer.textContent = userMemoryNotes.trim()
-      ? userMemoryNotes
-      : "Nothing remembered yet — it builds up as you chat.";
+    renderMemoryViewerContent();
     viewer.classList.add('visible');
+  }
+
+  function renderMemoryViewerContent(){
+    const viewer = document.getElementById('chatMemoryViewer');
+    if(!viewer) return;
+    const notes = userMemoryNotes.trim();
+    viewer.innerHTML = notes
+      ? `<div class="chat-memory-text">${escapeHtml(notes)}</div><button class="chat-memory-forget-btn" onclick="forgetMemory()">Forget this</button>`
+      : `<div class="chat-memory-text">Nothing remembered yet — it builds up as you chat.</div>`;
+  }
+
+  async function forgetMemory(){
+    try{
+      await fetch('/__ai_memory_delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+    }catch(e){ /* deleting is a courtesy — a failed request shouldn't get stuck mid-way */ }
+    userMemoryNotes = '';
+    renderMemoryViewerContent();
   }
 
   // Called whenever a conversation is left behind (switching chats, or starting a
