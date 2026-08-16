@@ -2627,10 +2627,22 @@ ${rule3}
   // new conversation's first exchange completes.
   async function generateSmartTitle(conversationId){
     try{
-      const titlePrompt = 'Summarize this conversation in 3 to 6 words as a short title. Reply with just the title itself — no quotes, no punctuation at the end, nothing else.';
-      const title = await callGeminiChat(chatHistory, titlePrompt);
-      const cleaned = title.replace(/^["']|["']$/g, '').trim();
+      const titlePrompt = 'Reply with ONLY a short title (3 to 6 words) summarizing this conversation. Do not use bullet points, lists, markdown formatting, asterisks, or any explanation — output nothing but the plain title text itself, on a single line.';
+      const rawTitle = await callGeminiChat(chatHistory, titlePrompt);
+
+      // Defensive cleanup — the model doesn't always follow formatting instructions
+      // perfectly (e.g. can slip into a bulleted list if the conversation itself
+      // was list-shaped), so this strips markdown/list artifacts no matter what
+      // actually comes back, rather than trusting the raw response as-is.
+      let cleaned = rawTitle
+        .replace(/[*_#`]/g, '')
+        .split('\n')
+        .map(line => line.replace(/^[\s\-•]+/, '').trim())
+        .find(line => line.length > 0) || '';
+      cleaned = cleaned.replace(/^["']|["']$/g, '').trim();
+      if(cleaned.length > 60) cleaned = cleaned.slice(0, 60).trim() + '…';
       if(!cleaned) return;
+
       await fetch('/__ai_conv_rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
