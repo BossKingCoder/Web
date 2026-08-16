@@ -1,4 +1,3 @@
-
 import { DurableObject } from "cloudflare:workers";
 
 const HUB_OPTIONS = [
@@ -591,7 +590,7 @@ export default {
       const id = body.id || crypto.randomUUID();
 
       const firstUserMsg = messages.find(m => m.role === 'user');
-      const title = firstUserMsg
+      const autoTitle = firstUserMsg
         ? (firstUserMsg.content.length > 40 ? firstUserMsg.content.slice(0, 40) + '…' : firstUserMsg.content)
         : 'New chat';
 
@@ -601,15 +600,56 @@ export default {
       const index = indexRaw ? JSON.parse(indexRaw) : [];
       const existing = index.find(c => c.id === id);
       const updatedAt = Date.now();
+      let title = autoTitle;
       if (existing) {
+        // Once renamed, the auto-generated title should never silently overwrite it again
+        title = existing.titleIsCustom ? existing.title : autoTitle;
         existing.title = title;
         existing.updatedAt = updatedAt;
       } else {
-        index.push({ id, title, updatedAt });
+        index.push({ id, title, updatedAt, pinned: false, titleIsCustom: false });
       }
       await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
 
       return new Response(JSON.stringify({ ok: true, id, title }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_rename' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      const newTitle = (body.title || '').trim().slice(0, 60);
+      if (id && newTitle) {
+        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+        const index = indexRaw ? JSON.parse(indexRaw) : [];
+        const entry = index.find(c => c.id === id);
+        if (entry) {
+          entry.title = newTitle;
+          entry.titleIsCustom = true;
+          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
+        }
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_pin' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      if (id) {
+        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+        const index = indexRaw ? JSON.parse(indexRaw) : [];
+        const entry = index.find(c => c.id === id);
+        if (entry) {
+          entry.pinned = !entry.pinned;
+          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
+        }
+      }
+      return new Response(JSON.stringify({ ok: true }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       });
     }
