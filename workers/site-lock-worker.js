@@ -424,6 +424,14 @@ export default {
       return handleSignupVerify(request, env);
     }
 
+    if (url.pathname === '/signup/oauth/github') {
+      return handleGithubOAuthStart(request, env);
+    }
+
+    if (url.pathname === '/signup/oauth/github/callback') {
+      return handleGithubOAuthCallback(request, env);
+    }
+
     if (url.pathname === '/__chat_ws') {
       const upgradeHeader = request.headers.get('Upgrade');
       if (!upgradeHeader || upgradeHeader !== 'websocket') {
@@ -990,6 +998,105 @@ async function handleSignupVerify(request, env) {
   });
 }
 
+async function handleGithubOAuthStart(request, env) {
+  const state = crypto.randomUUID();
+  await env.GUEST_KV.put(
+    'oauth_state:' + state,
+    JSON.stringify({ provider: 'github', createdAt: Date.now() }),
+    { expirationTtl: 600 }
+  );
+
+  const redirectUri = 'https://shauryashub.dev/signup/oauth/github/callback';
+  const authUrl = new URL('https://github.com/login/oauth/authorize');
+  authUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('scope', 'read:user user:email');
+  authUrl.searchParams.set('state', state);
+
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+async function handleGithubOAuthCallback(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+
+  if (!code || !state) {
+    return new Response(signupPage('GitHub sign-in was cancelled or failed — please try again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  // The state check is this flow's only CSRF protection, since the site has no
+  // session/cookie system — a value only we could have generated, checked for
+  // existence in KV and immediately deleted so it can't be replayed.
+  const stateRaw = await env.GUEST_KV.get('oauth_state:' + state);
+  if (!stateRaw) {
+    return new Response(signupPage('That sign-in link expired — please try again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+  await env.GUEST_KV.delete('oauth_state:' + state);
+
+  const redirectUri = 'https://shauryashub.dev/signup/oauth/github/callback';
+  const tokenUrl = new URL('https://github.com/login/oauth/access_token');
+  tokenUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
+  tokenUrl.searchParams.set('client_secret', env.GITHUB_CLIENT_SECRET);
+  tokenUrl.searchParams.set('code', code);
+  tokenUrl.searchParams.set('redirect_uri', redirectUri);
+
+  const tokenResponse = await fetch(tokenUrl.toString(), {
+    method: 'POST',
+    headers: { 'Accept': 'application/json' },
+  });
+  const tokenData = await tokenResponse.json().catch(() => ({}));
+  if (!tokenData.access_token) {
+    return new Response(signupPage('GitHub sign-in failed — please try again.'), {
+      status: 200, headers: { 'Content-Type': 'text/html' },
+    });
+  }
+
+  const profileResponse = await fetch('https://api.github.com/user', {
+    headers: {
+      'Authorization': `Bearer ${tokenData.access_token}`,
+      'User-Agent': 'Shauryas-Hub',
+      'Accept': 'application/vnd.github+json',
+    },
+  });
+  const profile = await profileResponse.json().catch(() => ({}));
+
+  // The main profile's email field is often null unless the user made it public —
+  // the dedicated emails endpoint gives the actual verified address instead.
+  const emailsResponse = await fetch('https://api.github.com/user/emails', {
+    headers: {
+      'Authorization': `Bearer ${tokenData.access_token}`,
+      'User-Agent': 'Shauryas-Hub',
+      'Accept': 'application/vnd.github+json',
+    },
+  });
+  const emailsData = await emailsResponse.json().catch(() => []);
+  const emails = Array.isArray(emailsData) ? emailsData : [];
+  const verifiedEmail = (emails.find(e => e.primary && e.verified) || emails.find(e => e.verified) || {}).email;
+  const email = verifiedEmail || profile.email || null;
+
+  // GitHub gives one combined display name, not separate first/last — split it
+  // as best as possible, falling back to their username where needed.
+  const fullName = (profile.name || profile.login || 'GitHub User').trim();
+  const nameParts = fullName.split(/\s+/);
+  const firstName = nameParts[0];
+  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : (profile.login || 'X');
+
+  const username = await generateUniqueUsername(env, firstName, lastName);
+  await env.GUEST_KV.put('request:' + username, JSON.stringify({
+    firstName, lastName, username, email: email || null,
+    requestedAt: new Date().toISOString(), signupMethod: 'github',
+  }));
+
+  return new Response(signupConfirmPage(username), {
+    status: 200, headers: { 'Content-Type': 'text/html' },
+  });
+}
+
 function signupPage(error) {
   return `<!DOCTYPE html>
 <html>
@@ -1011,6 +1118,14 @@ function signupPage(error) {
   .field-hint{color:#6C7BA3;font-size:11px;margin-top:-8px;margin-bottom:12px;line-height:1.4;}
   .back-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
   .back-link:hover{color:#E0AC3F;}
+  .oauth-btn{
+    display:block;width:100%;box-sizing:border-box;text-align:center;
+    padding:10px;border-radius:6px;font-weight:600;font-size:14px;
+    text-decoration:none;margin-bottom:14px;transition:opacity .15s ease;
+  }
+  .oauth-btn:hover{opacity:0.85;}
+  .github-btn{background:#24292e;color:#fff;}
+  .oauth-divider{text-align:center;color:#6C7BA3;font-size:11px;margin:2px 0 16px 0;text-transform:uppercase;letter-spacing:.05em;}
 </style>
 </head>
 <body>
@@ -1018,6 +1133,8 @@ function signupPage(error) {
     <h1>Request Access</h1>
     <div class="sub">Ask for access to Shaurya's Hub — tell me who you are and I'll take a look.</div>
     ${error ? `<div class="error">${error}</div>` : ''}
+    <a href="/signup/oauth/github" class="oauth-btn github-btn">Continue with GitHub</a>
+    <div class="oauth-divider">or fill in manually</div>
     <input type="text" name="first_name" placeholder="First name" autofocus required>
     <input type="text" name="last_name" placeholder="Last name" required>
     <input type="email" name="email" placeholder="Email (optional)">
