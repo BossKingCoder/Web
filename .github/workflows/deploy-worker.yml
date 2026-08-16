@@ -20,7 +20,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy workers/site-lock-worker.js --config wrangler.jsonc --name site-lock
-          secrets: |
-            GITHUB_CLIENT_SECRET
+          postCommands: |
+            echo "$GITHUB_CLIENT_SECRET" | npx wrangler secret put GITHUB_CLIENT_SECRET --name site-lock --config wrangler.jsonc
         env:
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
