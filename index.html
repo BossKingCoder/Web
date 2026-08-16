@@ -2595,6 +2595,7 @@ ${rule3}
 
   async function saveCurrentConversation(){
     if(chatHistory.length === 0) return;
+    const isBrandNewConversation = currentConversationId === null;
     try{
       // Images aren't persisted to storage — they're only sent to the AI for the live
       // exchange. Saving raw base64 image data in every conversation would make storage
@@ -2614,8 +2615,31 @@ ${rule3}
       if(data.ok){
         currentConversationId = data.id; // assigns the real id the first time a new chat is saved
         await loadConversationList();
+        if(isBrandNewConversation){
+          generateSmartTitle(currentConversationId); // fire-and-forget, don't block on it
+        }
       }
     }catch(e){ /* saving is a courtesy — a failed save shouldn't interrupt the chat itself */ }
+  }
+
+  // Generates a genuine short title summarizing the conversation, rather than
+  // just truncating the first message — triggered once, right after a brand
+  // new conversation's first exchange completes.
+  async function generateSmartTitle(conversationId){
+    try{
+      const titlePrompt = 'Summarize this conversation in 3 to 6 words as a short title. Reply with just the title itself — no quotes, no punctuation at the end, nothing else.';
+      const title = await callGeminiChat(chatHistory, titlePrompt);
+      const cleaned = title.replace(/^["']|["']$/g, '').trim();
+      if(!cleaned) return;
+      await fetch('/__ai_conv_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: conversationId, title: cleaned })
+      });
+      if(conversationId === currentConversationId){
+        await loadConversationList();
+      }
+    }catch(e){ /* if this fails, the plain truncated title from the save endpoint just stays as-is */ }
   }
 
   async function deleteCurrentChat(){
