@@ -321,11 +321,24 @@
   .chat-conv-item{
     padding:10px 12px;border-radius:6px;margin-bottom:6px;cursor:pointer;
     font-size:12.5px;color:var(--slate);border:1px solid transparent;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    display:flex;align-items:center;justify-content:space-between;gap:6px;
     transition:background .15s ease, border-color .15s ease, color .15s ease;
   }
   .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
   .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-conv-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;}
+  .chat-conv-item-actions{display:none;flex-shrink:0;gap:2px;}
+  .chat-conv-item:hover .chat-conv-item-actions{display:flex;}
+  .chat-conv-item-actions button{
+    background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;
+    opacity:0.7;transition:opacity .15s ease;
+  }
+  .chat-conv-item-actions button:hover{opacity:1;}
+  .chat-search-input{
+    width:100%;box-sizing:border-box;background:var(--ink);border:1px solid var(--line);
+    color:#F5F1E8;padding:8px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;
+  }
+  .chat-search-input:focus{outline:none;border-color:var(--brass-dim);}
   .chat-sidebar-empty{color:#6C7BA3;font-size:12px;padding:8px 4px;}
   .chat-conv-list{margin-bottom:4px;}
   .chat-memory-toggle{
@@ -359,6 +372,15 @@
   }
   .clear-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
   .clear-btn.active{border-color:var(--brass);color:#F5F1E8;background:rgba(224,172,63,0.12);}
+  .chat-head-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+  .mode-toggle-btn{
+    flex-shrink:0;background:var(--panel);border:1px solid var(--line);color:var(--slate);
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.03em;
+    padding:8px 14px;border-radius:6px;cursor:pointer;margin-top:4px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .mode-toggle-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .mode-toggle-btn.direct-mode{border-color:var(--brass);color:#F5F1E8;background:rgba(224,172,63,0.12);}
   .placeholder-note{
     font-size:13px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;
     border:1px dashed var(--line);border-radius:8px;padding:20px;text-align:center;
@@ -996,6 +1018,7 @@
   <main class="chat-with-sidebar">
     <div class="chat-sidebar">
       <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+      <input type="text" id="chatSearchInput" class="chat-search-input" placeholder="Search chats..." oninput="renderConversationList()">
       <div class="chat-conv-list" id="chatConvList"></div>
       <div class="chat-memory-toggle" onclick="toggleMemoryViewer()">What I remember about you</div>
       <div class="chat-memory-viewer" id="chatMemoryViewer"></div>
@@ -1004,9 +1027,13 @@
       <div class="view-head chat-head">
         <div>
           <h2>AI Assistant</h2>
-          <div class="view-sub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
+          <div class="view-sub" id="chatModeSub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
         </div>
-        <button class="clear-btn" onclick="deleteCurrentChat()">Delete chat</button>
+        <div class="chat-head-actions">
+          <button id="modeToggleBtn" class="mode-toggle-btn" onclick="toggleChatMode()">Mode: Walk me through it</button>
+          <button class="clear-btn" onclick="exportCurrentConversation()">Export</button>
+          <button class="clear-btn" onclick="deleteCurrentChat()">Delete chat</button>
+        </div>
       </div>
       <div id="chatlog"></div>
       <div id="chatImagePreview" class="chat-image-preview"></div>
@@ -2267,16 +2294,69 @@
     return 'Shaurya';
   }
 
+  function getChatMode(){
+    return localStorage.getItem('chatMode') || 'guided'; // 'guided' or 'direct'
+  }
+
+  function toggleChatMode(){
+    const newMode = getChatMode() === 'guided' ? 'direct' : 'guided';
+    localStorage.setItem('chatMode', newMode);
+    applyChatModeToUI();
+  }
+
+  function applyChatModeToUI(){
+    const mode = getChatMode();
+    const btn = document.getElementById('modeToggleBtn');
+    const sub = document.getElementById('chatModeSub');
+    if(btn){
+      btn.textContent = mode === 'guided' ? 'Mode: Walk me through it' : 'Mode: Just give me the answer';
+      btn.classList.toggle('direct-mode', mode === 'direct');
+    }
+    if(sub){
+      sub.textContent = mode === 'guided'
+        ? "Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight."
+        : "Gives you the direct answer straight away, no hints or guided reasoning first.";
+    }
+  }
+
   function buildChatSystemPrompt(){
     const name = getUserDisplayName();
     const schoolContext = window.__GUEST_USERNAME__ ? '' : ', a student at Wallington County Grammar School';
+    const mode = getChatMode();
+    const rule3 = mode === 'guided'
+      ? `3. Do not just hand over the direct answer to a question straight away. Guide ${name} toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless they explicitly ask you to just give them the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").`
+      : `3. Give ${name} the direct, complete answer straight away — no hints, no guided questions, no withholding it first. Still explain your reasoning alongside the answer, just don't make them work for it.`;
     return `You are a helpful, general-purpose assistant for ${name}${schoolContext}. Follow these rules:
 
 1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless ${name} specifically wants technical depth.
 2. Give simplified explanations by default. Break things down into their basic idea first.
-3. Do not just hand over the direct answer to a question straight away. Guide ${name} toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless they explicitly ask you to just give them the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").
+${rule3}
 4. You are a general assistant, not exclusively a study tool — help with anything ${name} brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
 5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
+  }
+
+  function exportCurrentConversation(){
+    if(chatHistory.length === 0){
+      alert('Nothing to export yet — this chat is empty.');
+      return;
+    }
+    const lines = chatHistory.map(m => {
+      const who = m.role === 'user' ? 'You' : 'AI';
+      const imageNote = m.image ? ' [Image attached]' : (m.imageRemoved ? ' [Image attached — not saved]' : '');
+      return `${who}: ${m.content}${imageNote}`;
+    });
+    const text = lines.join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const activeConv = conversationList.find(c => c.id === currentConversationId);
+    const filenameBase = activeConv ? activeConv.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase() : 'chat';
+    a.download = `${filenameBase || 'chat'}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   let chatHistory = [];
@@ -2432,15 +2512,55 @@
   function renderConversationList(){
     const container = document.getElementById('chatConvList');
     if(!container) return;
-    if(conversationList.length === 0){
-      container.innerHTML = '<div class="chat-sidebar-empty">No past chats yet.</div>';
+
+    const searchInput = document.getElementById('chatSearchInput');
+    const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+    let visible = query
+      ? conversationList.filter(c => c.title.toLowerCase().includes(query))
+      : conversationList;
+
+    // Pinned items float to the top; JS's sort is stable, so recency order
+    // within each group (already sorted by the server) is preserved.
+    visible = [...visible].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+    if(visible.length === 0){
+      container.innerHTML = `<div class="chat-sidebar-empty">${query ? 'No chats match that search.' : 'No past chats yet.'}</div>`;
       return;
     }
-    container.innerHTML = conversationList.map(c => `
+    container.innerHTML = visible.map(c => `
       <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
-        ${escapeHtml(c.title)}
+        <span class="chat-conv-title">${c.pinned ? '📌 ' : ''}${escapeHtml(c.title)}</span>
+        <div class="chat-conv-item-actions">
+          <button onclick="event.stopPropagation();togglePinConversation('${c.id}')" title="${c.pinned ? 'Unpin' : 'Pin'}">${c.pinned ? '📌' : '📍'}</button>
+          <button onclick="event.stopPropagation();startRenameConversation('${c.id}')" title="Rename">✏️</button>
+        </div>
       </div>
     `).join('');
+  }
+
+  async function togglePinConversation(id){
+    try{
+      await fetch('/__ai_conv_pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function startRenameConversation(id){
+    const existing = conversationList.find(c => c.id === id);
+    const newTitle = prompt('Rename this chat:', existing ? existing.title : '');
+    if(!newTitle || !newTitle.trim()) return;
+    try{
+      await fetch('/__ai_conv_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id, title: newTitle.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
   }
 
   async function openConversation(id){
@@ -5944,6 +6064,7 @@
   initHubCardGlow();
   loadConversationList();
   loadMemoryNotes();
+  applyChatModeToUI();
 
   if(window.__GUEST_USERNAME__){
     document.title = window.__GUEST_USERNAME__ + "'s Hub";
