@@ -712,6 +712,44 @@ export default {
       });
     }
 
+    if (url.pathname === '/__tts' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const text = (body.text || '').trim();
+      if (!text) {
+        return new Response(JSON.stringify({ error: 'no text provided' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      try {
+        const result = await env.AI.run('@cf/myshell-ai/melotts', {
+          prompt: text.slice(0, 1000), // reasonable cap — also keeps a single request from running away
+          lang: 'en',
+        });
+        const audioBytes = Uint8Array.from(atob(result.audio), c => c.charCodeAt(0));
+        return new Response(audioBytes, {
+          status: 200, headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      } catch (e) {
+        // Alert the owner that voice chat has silently dropped to the fallback
+        // browser voice — but only once per hour, so a bad patch doesn't flood the inbox.
+        const cooldownKey = 'tts_alert_cooldown';
+        const alreadyAlerted = await env.GUEST_KV.get(cooldownKey);
+        if (!alreadyAlerted) {
+          await env.GUEST_KV.put(cooldownKey, '1', { expirationTtl: 3600 });
+          await sendNotificationEmail(
+            env, env.OWNER_EMAIL,
+            'Voice chat TTS is failing — guests are on the fallback voice',
+            `The Cloudflare Workers AI text-to-speech call just failed with: ${e.message || 'unknown error'}\n\nGuests are automatically falling back to their browser's built-in voice in the meantime, so voice chat still works, just with the lower-quality fallback. Worth checking the Cloudflare dashboard if this keeps happening.`,
+            `<p>The Cloudflare Workers AI text-to-speech call just failed with: <strong>${escapeHtml(e.message || 'unknown error')}</strong></p><p>Guests are automatically falling back to their browser's built-in voice in the meantime, so voice chat still works, just with the lower-quality fallback. Worth checking the Cloudflare dashboard if this keeps happening.</p>`
+          );
+        }
+        return new Response(JSON.stringify({ error: 'tts_failed' }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     if (url.pathname === '/__admin_refresh' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const ownerUser = body.owner_username || '';
