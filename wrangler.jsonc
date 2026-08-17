@@ -1,5 +1,6 @@
 {
 "vars": { "GITHUB_CLIENT_ID": "Ov23liKt5KmYSK1W3YrU" },
+"ai": { "binding": "AI" },
   "name": "site-lock",
   "main": "workers/site-lock-worker.js",
   "compatibility_date": "2026-01-01",
