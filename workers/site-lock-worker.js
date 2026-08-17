@@ -722,14 +722,15 @@ export default {
       }
 
       try {
-        const result = await env.AI.run('@cf/myshell-ai/melotts', {
-          prompt: text.slice(0, 1000), // reasonable cap — also keeps a single request from running away
-          lang: 'en',
-        });
-        const audioBytes = Uint8Array.from(atob(result.audio), c => c.charCodeAt(0));
-        return new Response(audioBytes, {
-          status: 200, headers: { 'Content-Type': 'audio/mpeg' },
-        });
+        // Switched from MeloTTS to Deepgram Aura-1 — MeloTTS has had a known,
+        // ongoing "3043 internal server error" bug on Cloudflare's platform since
+        // early July, confirmed by other developers hitting the exact same thing.
+        // Aura-1 is a separate model, unaffected, and returns the audio response
+        // directly rather than needing manual base64 decoding.
+        const audioResponse = await env.AI.run('@cf/deepgram/aura-1', {
+          text: text.slice(0, 1000), // reasonable cap — also keeps a single request from running away
+        }, { returnRawResponse: true });
+        return audioResponse;
       } catch (e) {
         // Alert the owner that voice chat has silently dropped to the fallback
         // browser voice — but only once per hour, so a bad patch doesn't flood the inbox.
