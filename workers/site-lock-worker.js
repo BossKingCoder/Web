@@ -442,6 +442,72 @@ export default {
       return stub.fetch(request);
     }
 
+    if (url.pathname === '/__voice_ws') {
+      const upgradeHeader = request.headers.get('Upgrade');
+      if (!upgradeHeader || upgradeHeader !== 'websocket') {
+        return new Response('Expected a WebSocket connection', { status: 426 });
+      }
+
+      // The browser can't safely hold the AI Gateway's auth token itself — anyone
+      // could read it straight out of dev tools. So the browser talks to us, and
+      // we hold the real connection to Cloudflare server-side, relaying messages
+      // both ways. This is what actually lets audio start streaming back before
+      // the AI has even finished writing its full reply.
+      const gatewayUrl = `wss://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_AI_GATEWAY_ID}/workers-ai?model=@cf/deepgram/aura-1`;
+
+      let auraResp;
+      try {
+        auraResp = await fetch(gatewayUrl, {
+          headers: {
+            'Upgrade': 'websocket',
+            'cf-aig-authorization': env.CF_AI_GATEWAY_TOKEN,
+          },
+        });
+      } catch (e) {
+        auraResp = null;
+      }
+
+      const auraSocket = auraResp && auraResp.webSocket;
+      if (!auraSocket) {
+        // Alert the owner, same courtesy/cooldown pattern as the plain /__tts endpoint
+        const cooldownKey = 'tts_alert_cooldown';
+        const alreadyAlerted = await env.GUEST_KV.get(cooldownKey);
+        if (!alreadyAlerted) {
+          await env.GUEST_KV.put(cooldownKey, '1', { expirationTtl: 3600 });
+          await sendNotificationEmail(
+            env, env.OWNER_EMAIL,
+            'Voice chat streaming is failing — guests are on the fallback voice',
+            `The real-time voice connection to Cloudflare's AI Gateway just failed to establish.\n\nGuests are automatically falling back to their browser's built-in voice in the meantime, so voice chat still works, just with the lower-quality fallback. Worth checking the AI Gateway dashboard if this keeps happening.`,
+            `<p>The real-time voice connection to Cloudflare's AI Gateway just failed to establish.</p><p>Guests are automatically falling back to their browser's built-in voice in the meantime, so voice chat still works, just with the lower-quality fallback. Worth checking the AI Gateway dashboard if this keeps happening.</p>`
+          );
+        }
+        return new Response('Voice gateway unavailable', { status: 502 });
+      }
+
+      auraSocket.accept();
+
+      const [client, server] = Object.values(new WebSocketPair());
+      server.accept();
+
+      // Client -> Aura: forwards "Speak"/"Flush"/"Close" control messages as the
+      // browser sends each sentence-sized chunk of the AI's reply.
+      server.addEventListener('message', (event) => {
+        try { auraSocket.send(event.data); } catch (e) { /* connection may already be closing */ }
+      });
+
+      // Aura -> client: forwards audio chunks and control messages straight through
+      auraSocket.addEventListener('message', (event) => {
+        try { server.send(event.data); } catch (e) { /* connection may already be closing */ }
+      });
+
+      auraSocket.addEventListener('close', () => { try { server.close(); } catch (e) {} });
+      server.addEventListener('close', () => { try { auraSocket.close(); } catch (e) {} });
+      auraSocket.addEventListener('error', () => { try { server.close(); } catch (e) {} });
+      server.addEventListener('error', () => { try { auraSocket.close(); } catch (e) {} });
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     if (url.pathname === '/admin') {
       return handleAdmin(request, env);
     }
