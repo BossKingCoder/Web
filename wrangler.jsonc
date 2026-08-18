@@ -1,5 +1,5 @@
 {
-"vars": { "GITHUB_CLIENT_ID": "Ov23liKt5KmYSK1W3YrU" },
+"vars": { "GITHUB_CLIENT_ID": "Ov23liKt5KmYSK1W3YrU", "CF_ACCOUNT_ID": "e5dd56f2d9ead6a5d5d6cb0df95fdc90", "CF_AI_GATEWAY_ID": "shauryas-hub-voice" },
 "ai": { "binding": "AI" },
   "name": "site-lock",
   "main": "workers/site-lock-worker.js",
