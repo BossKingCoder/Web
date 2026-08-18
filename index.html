@@ -2784,55 +2784,142 @@ ${rule3}
     voiceRecognition.start();
   }
 
+  /* ---- Streaming voice playback (raw PCM over WebSocket) ---- */
+  let voiceAudioContext = null;
+  let voiceNextPlayTime = 0;
+
+  function getVoiceAudioContext(){
+    if(!voiceAudioContext){
+      voiceAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    }
+    return voiceAudioContext;
+  }
+
+  // Aura sends raw 16-bit PCM, mono, 24kHz — not a playable file format on its own,
+  // so each chunk gets converted and scheduled to play back-to-back with no gaps.
+  function playVoicePCMChunk(arrayBuffer){
+    const ctx = getVoiceAudioContext();
+    const int16 = new Int16Array(arrayBuffer);
+    const float32 = new Float32Array(int16.length);
+    for(let i = 0; i < int16.length; i++){
+      float32[i] = int16[i] / 32768;
+    }
+    const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+    audioBuffer.copyToChannel(float32, 0);
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+
+    const startTime = Math.max(ctx.currentTime, voiceNextPlayTime);
+    source.start(startTime);
+    voiceNextPlayTime = startTime + audioBuffer.duration;
+  }
+
   async function handleVoiceMessage(text){
     updateVoiceUI('thinking');
     chatHistory.push({ role: 'user', content: text });
 
-    let reply = "Sorry, something went wrong reaching the AI.";
+    // Open the streaming connection now, before text generation even starts,
+    // so it's ready the moment the first sentence is complete.
+    let ws = null;
+    let streamingFailed = false;
+    try{
+      const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${wsProtocol}//${location.host}/__voice_ws`);
+      ws.binaryType = 'arraybuffer';
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('voice_ws_timeout')), 5000);
+        ws.onopen = () => { clearTimeout(timeout); resolve(); };
+        ws.onerror = () => { clearTimeout(timeout); reject(new Error('voice_ws_error')); };
+      });
+    }catch(e){
+      streamingFailed = true;
+      ws = null;
+    }
+
+    if(ws){
+      ws.onmessage = (event) => {
+        if(event.data instanceof ArrayBuffer){
+          playVoicePCMChunk(event.data);
+        }
+        // JSON control messages (Metadata/Flushed/Warning) arrive as text — no action needed
+      };
+      ws.onerror = () => { streamingFailed = true; };
+    }
+
+    voiceNextPlayTime = 0;
+    let spokenSoFar = '';
+
+    function speakNewCompleteSentences(fullTextSoFar){
+      if(!ws || streamingFailed) return;
+      const unspoken = fullTextSoFar.slice(spokenSoFar.length);
+      const sentenceMatch = unspoken.match(/^(.*?[.!?])(\s|$)/);
+      if(sentenceMatch){
+        const sentence = sentenceMatch[1];
+        spokenSoFar += sentence + (sentenceMatch[2] || '');
+        if(ws.readyState === WebSocket.OPEN){
+          try{
+            ws.send(JSON.stringify({ type: 'Speak', text: sentence }));
+            ws.send(JSON.stringify({ type: 'Flush' }));
+          }catch(e){ streamingFailed = true; }
+        }
+        speakNewCompleteSentences(fullTextSoFar); // check for more complete sentences left over
+      }
+    }
+
+    let fullReply = "Sorry, something went wrong reaching the AI.";
     try{
       const basePrompt = buildChatSystemPrompt();
       const promptWithMemory = userMemoryNotes
         ? `${basePrompt}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
         : basePrompt;
-      reply = await callGeminiChat(chatHistory, promptWithMemory) || "Sorry, I didn't catch that.";
-    }catch(e){ /* reply already has a fallback message */ }
 
-    chatHistory.push({ role: 'assistant', content: reply });
-    document.getElementById('voiceTranscript').textContent = reply;
+      updateVoiceUI('speaking');
+      fullReply = await callGeminiChatStream(chatHistory, promptWithMemory, (partialText) => {
+        document.getElementById('voiceTranscript').textContent = partialText;
+        speakNewCompleteSentences(partialText);
+      });
+      if(!fullReply) fullReply = "Sorry, I didn't catch that.";
+    }catch(e){ /* fullReply already has a fallback message */ }
+
+    // Speak whatever's left over — the final clause often has no terminal punctuation
+    const remaining = fullReply.slice(spokenSoFar.length).trim();
+    if(remaining && ws && !streamingFailed && ws.readyState === WebSocket.OPEN){
+      try{
+        ws.send(JSON.stringify({ type: 'Speak', text: remaining }));
+        ws.send(JSON.stringify({ type: 'Flush' }));
+      }catch(e){ streamingFailed = true; }
+    }
+
+    chatHistory.push({ role: 'assistant', content: fullReply });
     saveCurrentConversation();
 
-    if(voiceModeActive){
-      await speakText(reply);
+    if(ws){
+      try{
+        if(ws.readyState === WebSocket.OPEN){
+          ws.send(JSON.stringify({ type: 'Close' }));
+        }
+        ws.close();
+      }catch(e){}
     }
-  }
 
-  async function speakText(text){
-    updateVoiceUI('speaking');
-    try{
-      const response = await fetch('/__tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      });
-      if(!response.ok) throw new Error('tts_failed');
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
+    if(!ws || streamingFailed){
+      // Streaming never worked this turn — fall back to speaking the whole reply
+      // via the browser's own voice, same safety net as before.
       await new Promise((resolve) => {
-        audio.onended = resolve;
-        audio.onerror = resolve;
-        audio.play().catch(resolve);
-      });
-      URL.revokeObjectURL(audioUrl);
-    }catch(e){
-      // Cloudflare TTS failed — fall back to the browser's own voice rather than staying silent
-      await new Promise((resolve) => {
-        const utterance = new SpeechSynthesisUtterance(text);
+        const utterance = new SpeechSynthesisUtterance(fullReply);
         utterance.onend = resolve;
         utterance.onerror = resolve;
         window.speechSynthesis.speak(utterance);
       });
+    }else{
+      // Let the already-queued audio actually finish playing before going idle
+      const ctx = getVoiceAudioContext();
+      const waitMs = Math.max(0, (voiceNextPlayTime - ctx.currentTime) * 1000);
+      await new Promise(resolve => setTimeout(resolve, waitMs + 200));
     }
+
     if(voiceModeActive){
       updateVoiceUI('idle');
     }
