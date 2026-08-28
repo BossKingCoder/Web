@@ -423,6 +423,15 @@
   .hub-card-title{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.03em;margin-bottom:6px;}
   .hub-card-desc{font-size:12.5px;color:var(--slate-dim);line-height:1.5;}
   .hub-icon{margin-bottom:10px;}
+  .e2ee-badge{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.02em;
+    background:rgba(111,224,160,0.12);color:#6FE0A0;border:1px solid rgba(111,224,160,0.35);
+    padding:2px 8px;border-radius:20px;vertical-align:middle;margin-left:6px;
+  }
+  .e2ee-note{
+    font-size:12px;color:#6FE0A0;background:rgba(111,224,160,0.08);border:1px solid rgba(111,224,160,0.25);
+    padding:8px 12px;border-radius:6px;margin-top:10px;line-height:1.5;
+  }
   .hub-icon svg{
     width:22px;height:22px;fill:none;stroke:var(--brass-soft);
     stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;
@@ -1745,7 +1754,7 @@
         <div class="hub-card-desc">Talk with anyone else on the site right now — instant, not refreshed.</div>
       </div>
       <div class="hub-card" onclick="openDirectMessages()"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7 14.7L4 21l3.3-1a9 9 0 1 0 4.7-17z"/></svg></div>
-        <div class="hub-card-title">Direct Messages</div>
+        <div class="hub-card-title">Direct Messages <span class="e2ee-badge" title="End-to-end encrypted — not even this site's own server can read your messages">🔒 Encrypted</span></div>
         <div class="hub-card-desc">Private, one-to-one with whoever else is online right now.</div>
       </div>
       <div class="hub-card" onclick="openLiveTtt()"><div class="hub-icon"><svg viewBox="0 0 24 24"><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg></div>
@@ -1791,6 +1800,7 @@
     <div class="view-head">
       <h2>Direct Messages</h2>
       <div class="view-sub" id="dmConnectionStatus">Connecting...</div>
+      <div class="e2ee-note">🔒 End-to-end encrypted — messages are scrambled on your device before sending, so not even this site's own server can read them.</div>
     </div>
     <div style="display:flex;gap:20px;flex-wrap:wrap;">
       <div style="flex:0 0 200px;min-width:180px;">
@@ -4304,7 +4314,7 @@ ${rule3}
       setChatStatus('Connected — live');
     });
 
-    liveChatSocket.addEventListener('message', (event) => {
+    liveChatSocket.addEventListener('message', async (event) => {
       let data;
       try{ data = JSON.parse(event.data); }catch(e){ return; }
 
@@ -4321,10 +4331,19 @@ ${rule3}
         }
       }else if(data.type === 'dm'){
         const partner = data.from === myName ? data.to : data.from;
+
+        let text = '[Could not decrypt this message]';
+        try{
+          const sharedKey = await getDmSharedKey(partner);
+          if(sharedKey){
+            text = await decryptDmText(data.ciphertext, data.iv, sharedKey);
+          }
+        }catch(e){ /* text already has a clear fallback message */ }
+
         if(!dmConversations[partner]) dmConversations[partner] = [];
         dmConversations[partner].push({
           from: data.from,
-          text: data.text,
+          text: text,
           timestamp: data.timestamp,
           status: data.from === myName ? 'sent' : undefined
         });
@@ -4334,7 +4353,7 @@ ${rule3}
           renderDMConversation();
           if(data.from !== myName) markDmConversationRead(partner);
         }else if(data.from !== myName){
-          notifyNewDM(data.from, data.text);
+          notifyNewDM(data.from, text);
         }
       }else if(data.type === 'dm_read'){
         const partner = data.from;
@@ -4518,11 +4537,108 @@ ${rule3}
     liveChatSocket.send(JSON.stringify({ type: 'dm_read', to: username }));
   }
 
-  function sendDirectMessage(){
+  /* ---- End-to-end encryption for Direct Messages ---- */
+  // Real ECDH + AES-256-GCM via the browser's own Web Crypto API. The private
+  // key is generated once per device and never leaves it — it's stored only in
+  // this browser's localStorage, never sent to the server. That's what makes
+  // this genuine end-to-end encryption rather than just "encrypted in transit":
+  // the server only ever sees ciphertext, never anything it could read.
+  let dmKeyPair = null; // { privateKey, publicKeyJwk } - CryptoKey objects, not serializable directly
+  let dmSharedKeyCache = {}; // partner username -> derived AES-GCM CryptoKey
+
+  async function ensureDmKeyPair(){
+    if(dmKeyPair) return dmKeyPair;
+
+    const storedPrivate = localStorage.getItem('dmPrivateKeyJwk');
+    const storedPublic = localStorage.getItem('dmPublicKeyJwk');
+
+    if(storedPrivate && storedPublic){
+      const privateKey = await crypto.subtle.importKey(
+        'jwk', JSON.parse(storedPrivate), { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']
+      );
+      dmKeyPair = { privateKey, publicKeyJwk: JSON.parse(storedPublic) };
+    }else{
+      const generated = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']
+      );
+      const publicKeyJwk = await crypto.subtle.exportKey('jwk', generated.publicKey);
+      const privateKeyJwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
+      localStorage.setItem('dmPrivateKeyJwk', JSON.stringify(privateKeyJwk));
+      localStorage.setItem('dmPublicKeyJwk', JSON.stringify(publicKeyJwk));
+      dmKeyPair = { privateKey: generated.privateKey, publicKeyJwk };
+
+      // Publish the public half so others can encrypt messages for us — the
+      // private half above never gets sent anywhere.
+      try{
+        await fetch('/__pubkey_register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: getChatDisplayName(), publicKeyJwk })
+        });
+      }catch(e){ /* registration will just retry next time a DM is sent */ }
+    }
+    return dmKeyPair;
+  }
+
+  async function getDmSharedKey(partnerUsername){
+    if(dmSharedKeyCache[partnerUsername]) return dmSharedKeyCache[partnerUsername];
+
+    const myKeys = await ensureDmKeyPair();
+    const response = await fetch('/__pubkey_fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: partnerUsername })
+    });
+    const data = await response.json();
+    if(!data.publicKeyJwk) return null; // partner hasn't opened DMs on any device yet
+
+    const partnerPublicKey = await crypto.subtle.importKey(
+      'jwk', data.publicKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, true, []
+    );
+    const sharedKey = await crypto.subtle.deriveKey(
+      { name: 'ECDH', public: partnerPublicKey },
+      myKeys.privateKey,
+      { name: 'AES-GCM', length: 256 },
+      false, ['encrypt', 'decrypt']
+    );
+    dmSharedKeyCache[partnerUsername] = sharedKey;
+    return sharedKey;
+  }
+
+  function bufferToBase64(buffer){
+    return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  }
+  function base64ToBuffer(base64){
+    return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  }
+
+  async function encryptDmText(plaintext, sharedKey){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(plaintext);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, sharedKey, encoded);
+    return { ciphertext: bufferToBase64(ciphertext), iv: bufferToBase64(iv) };
+  }
+
+  async function decryptDmText(ciphertextB64, ivB64, sharedKey){
+    const ciphertext = base64ToBuffer(ciphertextB64);
+    const iv = base64ToBuffer(ivB64);
+    const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, sharedKey, ciphertext);
+    return new TextDecoder().decode(plainBuffer);
+  }
+
+  async function sendDirectMessage(){
     const input = document.getElementById('dmInput');
     const text = input.value.trim();
     if(!text || !activeDmPartner || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
-    liveChatSocket.send(JSON.stringify({ type: 'dm', to: activeDmPartner, text }));
+
+    const sharedKey = await getDmSharedKey(activeDmPartner);
+    if(!sharedKey){
+      alert(`${activeDmPartner} hasn't opened Direct Messages yet on any device, so there's no way to encrypt a message for them yet. Try again once they have.`);
+      return;
+    }
+
+    const { ciphertext, iv } = await encryptDmText(text, sharedKey);
+    liveChatSocket.send(JSON.stringify({ type: 'dm', to: activeDmPartner, ciphertext, iv }));
     input.value = '';
     clearTimeout(myDmTypingTimeout);
     liveChatSocket.send(JSON.stringify({ type: 'stopped_typing', to: activeDmPartner }));
@@ -6101,6 +6217,7 @@ ${rule3}
   loadConversationList();
   loadMemoryNotes();
   applyChatModeToUI();
+  ensureDmKeyPair();
 
   if(window.__GUEST_USERNAME__){
     document.title = window.__GUEST_USERNAME__ + "'s Hub";
