@@ -42,6 +42,7 @@ async function deleteAllAiConversations(env, username) {
   }
   await env.GUEST_KV.delete('ai_conv_index:' + key);
   await env.GUEST_KV.delete('ai_memory:' + key);
+  await env.GUEST_KV.delete('pubkey:' + key);
 }
 
 // Shared helper for all guest-facing lifecycle emails — granted, denied, revoked,
@@ -159,12 +160,16 @@ export class ChatRoom extends DurableObject {
           text: data.text.slice(0, 500),
           timestamp: Date.now(),
         });
-      } else if (data.type === 'dm' && typeof data.text === 'string' && data.text.trim() && typeof data.to === 'string') {
+      } else if (data.type === 'dm' && typeof data.ciphertext === 'string' && typeof data.iv === 'string' && typeof data.to === 'string') {
+        // The server only ever sees and relays ciphertext here — it has no way to
+        // read the actual message content, that's the whole point of doing the
+        // encryption/decryption entirely on each person's own device.
         const payload = {
           type: 'dm',
           from: username,
           to: data.to,
-          text: data.text.slice(0, 500),
+          ciphertext: data.ciphertext.slice(0, 4000), // generous cap - base64 ciphertext runs longer than the original plaintext
+          iv: data.iv.slice(0, 64),
           timestamp: Date.now(),
         };
         let delivered = false;
@@ -708,6 +713,32 @@ export default {
       const key = aiHistoryKey(body.username);
       await env.GUEST_KV.delete('ai_memory:' + key);
       return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__pubkey_register' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const publicKeyJwk = body.publicKeyJwk;
+      if (!publicKeyJwk) {
+        return new Response(JSON.stringify({ error: 'no key provided' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      // Public keys are, by definition, safe to store openly — only the matching
+      // private key (which never leaves the owner's own browser) can decrypt anything.
+      await env.GUEST_KV.put('pubkey:' + key, JSON.stringify(publicKeyJwk));
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__pubkey_fetch' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const raw = await env.GUEST_KV.get('pubkey:' + key);
+      return new Response(JSON.stringify({ publicKeyJwk: raw ? JSON.parse(raw) : null }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       });
     }
