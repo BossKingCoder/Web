@@ -8,6 +8,8 @@
 <title>Shaurya's Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/docx@9/build/index.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/3.0.0/jspdf.umd.min.js"></script>
 <style>
   :root{
     --ink:#0B1530;
@@ -504,6 +506,19 @@
   .chat-image-preview-remove:hover{border-color:var(--accent-red);color:var(--accent-red);}
   .msg-image{max-width:220px;border-radius:8px;display:block;margin-top:8px;border:1px solid var(--line);}
   .msg-image-marker{color:var(--slate-dim);font-size:11.5px;font-style:italic;margin-top:6px;}
+  .doc-card{
+    display:flex;align-items:center;gap:12px;margin-top:10px;padding:12px 14px;
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;max-width:320px;
+  }
+  .doc-card-icon{font-size:26px;flex-shrink:0;}
+  .doc-card-info{flex:1;min-width:0;}
+  .doc-card-title{font-size:13.5px;color:#F5F1E8;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .doc-card-type{font-size:11px;color:var(--slate-dim);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;}
+  .doc-card-btn{
+    flex-shrink:0;background:var(--brass);color:var(--ink);border:none;padding:7px 14px;
+    border-radius:6px;font-weight:600;font-size:12px;cursor:pointer;transition:background .15s ease;
+  }
+  .doc-card-btn:hover{background:var(--brass-soft);}
   .typing{color:var(--slate-dim);font-size:13px;font-style:italic;display:flex;align-items:center;gap:6px;}
   .typing-dots{display:inline-flex;gap:3px;}
   .typing-dots span{
@@ -2342,7 +2357,131 @@
 2. Give simplified explanations by default. Break things down into their basic idea first.
 ${rule3}
 4. You are a general assistant, not exclusively a study tool — help with anything ${name} brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
-5. Keep responses concise. Don't pad answers with unnecessary preamble.`;
+5. Keep responses concise. Don't pad answers with unnecessary preamble.
+6. If ${name} asks for something that's really a document — a report, essay, letter, story, or anything meant to be saved or handed in, not just read in chat — write a short line introducing it, then include the actual content wrapped EXACTLY like this, with nothing else inside the markers:
+[[DOCUMENT type="docx" title="Short Title Here"]]
+# Main Heading
+A regular paragraph of text.
+## A Section Heading
+- A bullet point
+- Another bullet point
+**A bold standalone line, if needed**
+[[/DOCUMENT]]
+Use type="docx" for reports, essays, letters, and anything long-form. Use type="pdf" instead only if ${name} specifically asks for a PDF, a flyer, or a one-page printable thing. Use # for the one main title, ## for section headings, lines starting with - for bullet points, and a whole line wrapped in ** for a bold standalone line. Don't use any other markdown — no tables, no numbered lists, no nested bullets, no inline bold mid-sentence. Keep it to plain paragraphs, headings, and bullets only. Never use this format for a normal conversational answer — only when ${name} genuinely wants a document out of it.`;
+  }
+
+  /* ---- AI-generated document downloads (Word docs / PDFs) ---- */
+  // Detects the [[DOCUMENT ...]] marker the AI is instructed to use when the
+  // user wants something saved as a real file, rather than just read in chat.
+  function parseDocumentMarker(fullText){
+    const match = fullText.match(/\[\[DOCUMENT type="(docx|pdf)" title="([^"]*)"\]\]([\s\S]*?)\[\[\/DOCUMENT\]\]/);
+    if(!match) return null;
+    return { type: match[1], title: (match[2] || 'Document').trim(), content: match[3].trim() };
+  }
+
+  // Deliberately simple, matching the deliberately simple format the AI is asked
+  // to use — headings, bullets, plain paragraphs, and whole-line bold only.
+  function parseDocumentBlocks(content){
+    const blocks = [];
+    for(const rawLine of content.split('\n')){
+      const line = rawLine.trim();
+      if(!line) continue;
+      if(line.startsWith('## ')){
+        blocks.push({ type: 'heading2', text: line.slice(3).trim() });
+      }else if(line.startsWith('# ')){
+        blocks.push({ type: 'heading1', text: line.slice(2).trim() });
+      }else if(line.startsWith('- ') || line.startsWith('* ')){
+        blocks.push({ type: 'bullet', text: line.slice(2).trim() });
+      }else{
+        const boldMatch = line.match(/^\*\*(.+)\*\*$/);
+        if(boldMatch){
+          blocks.push({ type: 'paragraph', text: boldMatch[1], bold: true });
+        }else{
+          blocks.push({ type: 'paragraph', text: line.replace(/\*\*/g, ''), bold: false });
+        }
+      }
+    }
+    return blocks;
+  }
+
+  async function generateDocxBlob(title, blocks){
+    const { Document, Paragraph, Packer, TextRun, HeadingLevel } = docx;
+    const children = [ new Paragraph({ text: title, heading: HeadingLevel.TITLE }) ];
+    for(const b of blocks){
+      if(b.type === 'heading1'){
+        children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_1, spacing: { before: 240, after: 120 } }));
+      }else if(b.type === 'heading2'){
+        children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_2, spacing: { before: 200, after: 100 } }));
+      }else if(b.type === 'bullet'){
+        children.push(new Paragraph({ text: b.text, bullet: { level: 0 }, spacing: { after: 60 } }));
+      }else{
+        children.push(new Paragraph({
+          children: [ new TextRun({ text: b.text, bold: !!b.bold }) ],
+          spacing: { after: 120 },
+        }));
+      }
+    }
+    const doc = new Document({ sections: [{ children }] });
+    return await Packer.toBlob(doc);
+  }
+
+  function generatePdfBlob(title, blocks){
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 20;
+    const maxWidth = pageWidth - margin * 2;
+    let y = 22;
+
+    function checkPageBreak(neededSpace){
+      if(y + neededSpace > 280){ doc.addPage(); y = 20; }
+    }
+    function writeLines(text, size, style, indent, lineGap, afterGap){
+      doc.setFont('helvetica', style);
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(text, maxWidth - indent);
+      checkPageBreak(lines.length * lineGap + 4);
+      doc.text(lines, margin + indent, y);
+      y += lines.length * lineGap + afterGap;
+    }
+
+    writeLines(title, 20, 'bold', 0, 9, 8);
+    for(const b of blocks){
+      if(b.type === 'heading1') writeLines(b.text, 15, 'bold', 0, 7, 6);
+      else if(b.type === 'heading2') writeLines(b.text, 12.5, 'bold', 0, 6, 5);
+      else if(b.type === 'bullet') writeLines('•  ' + b.text, 11, 'normal', 4, 5.5, 3);
+      else writeLines(b.text, 11, b.bold ? 'bold' : 'normal', 0, 5.5, 5);
+    }
+    return doc.output('blob');
+  }
+
+  function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadGeneratedDocument(msgIndex){
+    const doc = chatHistory[msgIndex] && chatHistory[msgIndex].document;
+    if(!doc) return;
+    const blocks = parseDocumentBlocks(doc.content);
+    const safeFilename = doc.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'document';
+    try{
+      if(doc.type === 'docx'){
+        const blob = await generateDocxBlob(doc.title, blocks);
+        downloadBlob(blob, `${safeFilename}.docx`);
+      }else{
+        const blob = generatePdfBlob(doc.title, blocks);
+        downloadBlob(blob, `${safeFilename}.pdf`);
+      }
+    }catch(e){
+      alert("Something went wrong generating that file — try asking the AI to write it again.");
+    }
   }
 
   function exportCurrentConversation(){
@@ -2886,7 +3025,18 @@ ${rule3}
         ? `<img class="msg-image" src="data:${m.image.mimeType};base64,${m.image.data}" alt="Attached image">`
         : (m.imageRemoved ? `<div class="msg-image-marker">📎 Image attached (not saved between sessions)</div>` : '');
 
-      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'AI'}</div><div class="body" id="msgBody${i}">${escapeHtml(m.content)}${imageHtml}</div>${actionsHtml}`;
+      const docHtml = m.document
+        ? `<div class="doc-card">
+            <div class="doc-card-icon">${m.document.type === 'docx' ? '📄' : '📕'}</div>
+            <div class="doc-card-info">
+              <div class="doc-card-title">${escapeHtml(m.document.title)}</div>
+              <div class="doc-card-type">${m.document.type === 'docx' ? 'Word Document' : 'PDF'}</div>
+            </div>
+            <button class="doc-card-btn" onclick="downloadGeneratedDocument(${i})">Download</button>
+          </div>`
+        : '';
+
+      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'AI'}</div><div class="body" id="msgBody${i}">${escapeHtml(m.content)}${imageHtml}${docHtml}</div>${actionsHtml}`;
       log.appendChild(div);
     });
     log.scrollTop = log.scrollHeight;
@@ -2972,7 +3122,15 @@ ${rule3}
       });
       streamEnded = true;
 
-      chatHistory.push({ role: 'assistant', content: reply || 'No response.' });
+      const finalReply = reply || 'No response.';
+      const docMarker = parseDocumentMarker(finalReply);
+      if(docMarker){
+        const displayText = finalReply.replace(/\[\[DOCUMENT[\s\S]*?\[\/DOCUMENT\]\]/, '').trim()
+          || `Here's your ${docMarker.type === 'docx' ? 'Word document' : 'PDF'}: **${docMarker.title}**`;
+        chatHistory.push({ role: 'assistant', content: displayText, document: docMarker });
+      }else{
+        chatHistory.push({ role: 'assistant', content: finalReply });
+      }
     }catch(e){
       streamEnded = true;
       chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
