@@ -272,6 +272,38 @@
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
   @media (prefers-reduced-motion: reduce){.status-dot{animation:none;}}
 
+  .call-choice-overlay{
+    position:fixed;inset:0;background:rgba(11,21,48,0.75);z-index:200;
+    display:flex;align-items:center;justify-content:center;padding:20px;
+  }
+  .call-choice-box{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:28px;max-width:340px;width:100%;text-align:center;
+  }
+  .call-choice-title{font-family:'Bebas Neue',sans-serif;font-size:24px;color:#F5F1E8;letter-spacing:.03em;}
+  .call-choice-sub{font-size:13px;color:var(--slate-dim);margin:6px 0 20px;}
+  .call-choice-buttons{display:flex;gap:12px;}
+  .call-choice-btn{
+    flex:1;background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;
+    padding:18px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:8px;
+    color:#F5F1E8;font-size:13px;font-weight:600;transition:border-color .15s ease,background .15s ease;
+  }
+  .call-choice-btn:hover{border-color:var(--brass);background:rgba(224,172,63,0.1);}
+  .call-choice-icon{font-size:28px;}
+  .call-choice-cancel{
+    margin-top:16px;background:none;border:none;color:var(--slate-dim);font-size:12.5px;
+    cursor:pointer;text-decoration:underline;
+  }
+
+  .call-reaction-float{
+    position:absolute;bottom:50px;font-size:32px;animation:reactionFloat 2.2s ease-out forwards;
+  }
+  @keyframes reactionFloat{
+    0%{transform:translateY(0) scale(0.8);opacity:0;}
+    15%{transform:translateY(-20px) scale(1.1);opacity:1;}
+    100%{transform:translateY(-160px) scale(1);opacity:0;}
+  }
+
   /* ---- Widgets ---- */
   .widget-row{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap;}
   .widget{
@@ -519,6 +551,36 @@
     border-radius:6px;font-weight:600;font-size:12px;cursor:pointer;transition:background .15s ease;
   }
   .doc-card-btn:hover{background:var(--brass-soft);}
+
+  .fullscreen-toggle-btn{
+    position:absolute;top:10px;right:10px;z-index:5;
+    background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.3);color:#fff;
+    width:32px;height:32px;border-radius:6px;font-size:16px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    transition:background .15s ease;
+  }
+  .fullscreen-toggle-btn:hover{background:rgba(0,0,0,0.8);}
+
+  .fullscreen-only-controls{
+    display:none;position:absolute;bottom:14px;left:50%;transform:translateX(-50%);gap:8px;
+  }
+  #videoCallArea:fullscreen,
+  #videoCallArea:-webkit-full-screen{
+    display:flex !important;align-items:center;justify-content:center;
+    background:#000;border-radius:0;
+  }
+  #videoCallArea:fullscreen #remoteCallVideo,
+  #videoCallArea:-webkit-full-screen #remoteCallVideo{
+    max-height:100vh;height:100vh;width:100%;object-fit:contain;
+  }
+  #videoCallArea:fullscreen .fullscreen-only-controls,
+  #videoCallArea:-webkit-full-screen .fullscreen-only-controls{
+    display:flex;
+  }
+  #videoCallArea:fullscreen #localCallVideo,
+  #videoCallArea:-webkit-full-screen #localCallVideo{
+    width:180px;bottom:20px;right:20px;
+  }
   .typing{color:var(--slate-dim);font-size:13px;font-style:italic;display:flex;align-items:center;gap:6px;}
   .typing-dots{display:inline-flex;gap:3px;}
   .typing-dots span{
@@ -1825,7 +1887,25 @@
       <div style="flex:1;min-width:280px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div class="cs-label" id="dmConversationHeader" style="margin-bottom:0;">Pick someone online to start a conversation.</div>
-          <button class="clear-btn" id="voiceCallBtn" onclick="startVoiceCall()" style="display:none;">Call</button>
+          <button class="clear-btn" id="voiceCallBtn" onclick="openCallChoiceModal()" style="display:none;">Call</button>
+        </div>
+
+        <div id="callChoiceModal" class="call-choice-overlay" style="display:none;">
+          <div class="call-choice-box">
+            <div class="call-choice-title">Start a call</div>
+            <div class="call-choice-sub">How do you want to call <span id="callChoicePartnerName"></span>?</div>
+            <div class="call-choice-buttons">
+              <button class="call-choice-btn" onclick="confirmStartCall(false)">
+                <span class="call-choice-icon">🎙️</span>
+                <span>Voice Only</span>
+              </button>
+              <button class="call-choice-btn" onclick="confirmStartCall(true)">
+                <span class="call-choice-icon">📹</span>
+                <span>Video</span>
+              </button>
+            </div>
+            <button class="call-choice-cancel" onclick="closeCallChoiceModal()">Cancel</button>
+          </div>
         </div>
 
         <div id="incomingCallBanner" style="display:none;background:var(--panel-raised);border:1px solid var(--accent-pink);border-radius:8px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
@@ -1840,6 +1920,28 @@
           <div id="activeCallText" style="font-size:14px;color:var(--signal);"></div>
           <div style="display:flex;gap:8px;">
             <button class="timer-btn" id="muteCallBtn" onclick="toggleMuteVoiceCall()">Mute</button>
+            <button class="timer-btn" id="cameraCallBtn" onclick="toggleCameraVoiceCall()" style="display:none;">Camera Off</button>
+            <button class="timer-btn" id="screenShareBtn" onclick="toggleScreenShare()">Share Screen</button>
+            <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+          </div>
+        </div>
+
+        <div id="videoCallArea" style="display:none;position:relative;background:#000;border-radius:8px;margin-bottom:14px;overflow:hidden;">
+          <video id="remoteCallVideo" autoplay playsinline style="width:100%;display:block;max-height:360px;object-fit:cover;background:#000;"></video>
+          <video id="localCallVideo" autoplay playsinline muted style="position:absolute;bottom:10px;right:10px;width:110px;border-radius:6px;border:2px solid var(--panel-raised);object-fit:cover;"></video>
+          <div id="callReactionsOverlay" style="position:absolute;inset:0;pointer-events:none;overflow:hidden;"></div>
+          <button id="fullscreenCallBtn" class="fullscreen-toggle-btn" onclick="toggleCallFullscreen()" title="Fullscreen">⛶</button>
+          <div style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px;">
+            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👍')">👍</button>
+            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('❤️')">❤️</button>
+            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('😂')">😂</button>
+            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('🎉')">🎉</button>
+            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👏')">👏</button>
+          </div>
+          <div class="fullscreen-only-controls">
+            <button class="timer-btn" onclick="toggleMuteVoiceCall()">Mute</button>
+            <button class="timer-btn" onclick="toggleCameraVoiceCall()">Camera</button>
+            <button class="timer-btn" onclick="toggleScreenShare()">Share Screen</button>
             <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
           </div>
         </div>
@@ -4564,6 +4666,10 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
         hideIncomingCallBanner();
         pendingVoiceOffer = null;
         endVoiceCall(false);
+      }else if(data.type === 'voice_reaction'){
+        if(voiceCallState && data.from === voiceCallState.partner){
+          showFloatingReaction(data.emoji);
+        }
       }
     });
 
@@ -5151,24 +5257,61 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
     return data.iceServers;
   }
 
-  function playRemoteAudio(stream){
-    let audioEl = document.getElementById('remoteCallAudio');
-    if(!audioEl){
-      audioEl = document.createElement('audio');
-      audioEl.id = 'remoteCallAudio';
-      audioEl.autoplay = true;
-      document.body.appendChild(audioEl);
-    }
-    audioEl.srcObject = stream;
+  function playRemoteStream(stream){
+    const videoEl = document.getElementById('remoteCallVideo');
+    if(videoEl) videoEl.srcObject = stream;
   }
 
-  async function startVoiceCall(){
+  // Tries camera + mic first; falls back to mic-only if the camera fails or
+  // isn't available, rather than failing the whole call over it.
+  // wantsVideo is now an explicit choice from the modal, not an automatic
+  // try-video-first — Voice Only means never even prompting for the camera.
+  async function getCallMedia(wantsVideo){
+    if(!wantsVideo){
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return { stream, hasVideo: false };
+    }
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      return { stream, hasVideo: true };
+    }catch(e){
+      // They asked for video but the camera failed (denied, unavailable, etc.) —
+      // fall back to audio rather than blocking the call entirely over it.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return { stream, hasVideo: false };
+    }
+  }
+
+  function setLocalCallVideo(stream, hasVideo){
+    const videoEl = document.getElementById('localCallVideo');
+    if(videoEl) videoEl.srcObject = hasVideo ? stream : null;
+  }
+
+  function openCallChoiceModal(){
+    if(!activeDmPartner) return;
+    const nameEl = document.getElementById('callChoicePartnerName');
+    if(nameEl) nameEl.textContent = activeDmPartner;
+    const modal = document.getElementById('callChoiceModal');
+    if(modal) modal.style.display = 'flex';
+  }
+
+  function closeCallChoiceModal(){
+    const modal = document.getElementById('callChoiceModal');
+    if(modal) modal.style.display = 'none';
+  }
+
+  function confirmStartCall(wantsVideo){
+    closeCallChoiceModal();
+    startVoiceCall(wantsVideo);
+  }
+
+  async function startVoiceCall(wantsVideo){
     if(!activeDmPartner || voiceCallState) return;
     const partner = activeDmPartner;
 
     try{
       const iceServers = await fetchTurnCredentials();
-      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const { stream: localStream, hasVideo } = await getCallMedia(wantsVideo);
       const pc = new RTCPeerConnection({ iceServers });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
@@ -5177,14 +5320,15 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
           liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: partner, candidate: e.candidate }));
         }
       };
-      pc.ontrack = (e) => playRemoteAudio(e.streams[0]);
+      pc.ontrack = (e) => playRemoteStream(e.streams[0]);
       pc.onconnectionstatechange = () => {
         if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
           endVoiceCall(false);
         }
       };
 
-      voiceCallState = { pc, partner, localStream, muted: false };
+      voiceCallState = { pc, partner, localStream, muted: false, hasVideo, cameraOff: false };
+      setLocalCallVideo(localStream, hasVideo);
       updateVoiceCallUI('calling', partner);
 
       const offer = await pc.createOffer();
@@ -5218,7 +5362,7 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
 
     try{
       const iceServers = await fetchTurnCredentials();
-      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const { stream: localStream, hasVideo } = await getCallMedia(true);
       const pc = new RTCPeerConnection({ iceServers });
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
@@ -5227,7 +5371,7 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
           liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: from, candidate: e.candidate }));
         }
       };
-      pc.ontrack = (e) => playRemoteAudio(e.streams[0]);
+      pc.ontrack = (e) => playRemoteStream(e.streams[0]);
       pc.onconnectionstatechange = () => {
         if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
           endVoiceCall(false);
@@ -5239,7 +5383,8 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
       await pc.setLocalDescription(answer);
       liveChatSocket.send(JSON.stringify({ type: 'voice_answer', to: from, sdp: answer }));
 
-      voiceCallState = { pc, partner: from, localStream, muted: false };
+      voiceCallState = { pc, partner: from, localStream, muted: false, hasVideo, cameraOff: false };
+      setLocalCallVideo(localStream, hasVideo);
       pendingVoiceOffer = null;
       hideIncomingCallBanner();
       updateVoiceCallUI('active', from);
@@ -5265,11 +5410,90 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
       }
       try{ voiceCallState.pc.close(); }catch(e){}
       voiceCallState.localStream.getTracks().forEach(t => t.stop());
+      if(voiceCallState.screenStream){
+        voiceCallState.screenStream.getTracks().forEach(t => t.stop());
+      }
       voiceCallState = null;
     }
-    const audioEl = document.getElementById('remoteCallAudio');
-    if(audioEl) audioEl.srcObject = null;
+    const remoteVideo = document.getElementById('remoteCallVideo');
+    const localVideo = document.getElementById('localCallVideo');
+    if(remoteVideo) remoteVideo.srcObject = null;
+    if(localVideo) localVideo.srcObject = null;
+    const shareBtn = document.getElementById('screenShareBtn');
+    if(shareBtn) shareBtn.textContent = 'Share Screen';
+    if(document.fullscreenElement || document.webkitFullscreenElement){
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if(exit) exit.call(document);
+    }
     updateVoiceCallUI('idle');
+  }
+
+  function toggleCameraVoiceCall(){
+    if(!voiceCallState || !voiceCallState.hasVideo) return;
+    voiceCallState.cameraOff = !voiceCallState.cameraOff;
+    voiceCallState.localStream.getVideoTracks().forEach(track => { track.enabled = !voiceCallState.cameraOff; });
+    const btn = document.getElementById('cameraCallBtn');
+    if(btn) btn.textContent = voiceCallState.cameraOff ? 'Camera On' : 'Camera Off';
+  }
+
+  // Screen sharing swaps the outgoing video track on the call that's already
+  // connected — no renegotiation needed, just a clean substitution. Kept to
+  // video calls specifically, since a voice-only call has no video sender to
+  // swap in the first place, and adding one mid-call would need a much more
+  // fragile bit of signaling than this deliberately doesn't take on.
+  function toggleCallFullscreen(){
+    const area = document.getElementById('videoCallArea');
+    if(!area) return;
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+    if(!isFullscreen){
+      const request = area.requestFullscreen || area.webkitRequestFullscreen;
+      if(request) request.call(area);
+    }else{
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if(exit) exit.call(document);
+    }
+  }
+
+  async function toggleScreenShare(){
+    if(!voiceCallState) return;
+    if(!voiceCallState.hasVideo){
+      alert("Screen sharing needs a video call. Hang up and call again, choosing Video this time.");
+      return;
+    }
+
+    const btn = document.getElementById('screenShareBtn');
+
+    if(voiceCallState.screenStream){
+      // Currently sharing — stop and switch back to the camera
+      voiceCallState.screenStream.getTracks().forEach(t => t.stop());
+      voiceCallState.screenStream = null;
+      const cameraTrack = voiceCallState.localStream.getVideoTracks()[0];
+      const sender = voiceCallState.pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if(sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+      setLocalCallVideo(voiceCallState.localStream, true);
+      if(btn) btn.textContent = 'Share Screen';
+      return;
+    }
+
+    try{
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      const sender = voiceCallState.pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if(sender) await sender.replaceTrack(screenTrack);
+      voiceCallState.screenStream = screenStream;
+      setLocalCallVideo(screenStream, true);
+      if(btn) btn.textContent = 'Stop Sharing';
+
+      // The browser's own native "Stop sharing" bar can end this outside our
+      // button entirely — this catches that and reverts cleanly either way.
+      screenTrack.onended = () => {
+        if(voiceCallState && voiceCallState.screenStream){
+          toggleScreenShare();
+        }
+      };
+    }catch(e){
+      // They cancelled the screen-picker prompt, or it wasn't allowed — no error needed
+    }
   }
 
   function toggleMuteVoiceCall(){
@@ -5282,30 +5506,55 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
     if(navBtn) navBtn.textContent = voiceCallState.muted ? 'Unmute' : 'Mute';
   }
 
+  function sendCallReaction(emoji){
+    if(!voiceCallState || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'voice_reaction', to: voiceCallState.partner, emoji }));
+    showFloatingReaction(emoji);
+  }
+
+  function showFloatingReaction(emoji){
+    const overlay = document.getElementById('callReactionsOverlay');
+    if(!overlay) return;
+    const el = document.createElement('div');
+    el.className = 'call-reaction-float';
+    el.textContent = emoji;
+    el.style.left = (20 + Math.random() * 60) + '%';
+    overlay.appendChild(el);
+    setTimeout(() => el.remove(), 2200);
+  }
+
   function updateVoiceCallUI(state, partner){
     const callBtn = document.getElementById('voiceCallBtn');
     const activeBar = document.getElementById('activeCallBar');
     const activeText = document.getElementById('activeCallText');
     const navBar = document.getElementById('navCallBar');
     const navText = document.getElementById('navCallText');
+    const videoArea = document.getElementById('videoCallArea');
+    const cameraBtn = document.getElementById('cameraCallBtn');
     if(!callBtn || !activeBar || !activeText || !navBar || !navText) return;
 
     if(state === 'idle'){
       activeBar.style.display = 'none';
       callBtn.style.display = activeDmPartner ? 'inline-block' : 'none';
       navBar.style.display = 'none';
+      if(videoArea) videoArea.style.display = 'none';
+      if(cameraBtn) cameraBtn.style.display = 'none';
     }else if(state === 'calling'){
       callBtn.style.display = 'none';
       activeBar.style.display = 'flex';
       activeText.textContent = 'Calling ' + partner + '...';
       navBar.style.display = 'flex';
       navText.textContent = 'Calling ' + partner + '...';
+      if(videoArea && voiceCallState) videoArea.style.display = voiceCallState.hasVideo ? 'block' : 'none';
+      if(cameraBtn) cameraBtn.style.display = (voiceCallState && voiceCallState.hasVideo) ? 'inline-block' : 'none';
     }else if(state === 'active'){
       callBtn.style.display = 'none';
       activeBar.style.display = 'flex';
       activeText.textContent = 'On call with ' + partner;
       navBar.style.display = 'flex';
       navText.textContent = 'On call: ' + partner;
+      if(videoArea && voiceCallState) videoArea.style.display = voiceCallState.hasVideo ? 'block' : 'none';
+      if(cameraBtn) cameraBtn.style.display = (voiceCallState && voiceCallState.hasVideo) ? 'inline-block' : 'none';
     }
   }
 
