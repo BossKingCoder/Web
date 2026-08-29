@@ -1,2337 +1,7021 @@
-import { DurableObject } from "cloudflare:workers";
-
-const HUB_OPTIONS = [
-  { id: 'chat', label: 'AI Assistant' },
-  { id: 'study', label: 'Study Hub' },
-  { id: 'entertainment', label: 'Entertainment Hub' },
-  { id: 'games', label: 'Game Hub' },
-  { id: 'utilities', label: 'Utilities Hub' },
-  { id: 'challenges', label: 'Challenges Hub' },
-  { id: 'multiplayer', label: 'Multiplayer Hub' },
-];
-
-// Owner credentials normally live as Worker secrets, but a KV override lets
-// the password be changed from /admin without editing the dashboard directly.
-async function getOwnerCredentials(env) {
-  const raw = await env.GUEST_KV.get('owner:override');
-  if (raw) {
-    const override = JSON.parse(raw);
-    return { username: override.username, password: override.password };
-  }
-  return { username: env.AUTH_USERNAME, password: env.AUTH_PASSWORD };
-}
-
-async function isOwner(env, username, password) {
-  const creds = await getOwnerCredentials(env);
-  return username === creds.username && password === creds.password;
-}
-
-// A real guest username could theoretically collide with something like "Shaurya"
-// if the owner ever created a guest with that name, so the owner's own AI chat
-// history uses a distinct reserved key instead of their display name.
-function aiHistoryKey(username) {
-  const trimmed = (username || '').trim();
-  return trimmed ? trimmed : '__owner__';
-}
-
-async function deleteAllAiConversations(env, username) {
-  const key = aiHistoryKey(username);
-  const list = await env.GUEST_KV.list({ prefix: 'ai_conv:' + key + ':' });
-  for (const k of list.keys) {
-    await env.GUEST_KV.delete(k.name);
-  }
-  await env.GUEST_KV.delete('ai_conv_index:' + key);
-  await env.GUEST_KV.delete('ai_memory:' + key);
-  await env.GUEST_KV.delete('pubkey:' + key);
-  await env.GUEST_KV.delete('ai_projects:' + key);
-}
-
-// Shared helper for all guest-facing lifecycle emails — granted, denied, revoked,
-// deleted, and hub-shutdown notices. No-ops quietly if there's no email to send to.
-// Wraps any email's inner content in a consistently branded, table-based HTML shell.
-// Table layout + inline styles throughout — the only approach that renders reliably
-// across Gmail, Outlook, and Apple Mail, none of which handle modern CSS well.
-function wrapEmailHtml(innerHtml) {
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0E1B3D;padding:40px 16px;">
-  <tr><td align="center">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:420px;background-color:#16234F;border-radius:10px;overflow:hidden;">
-      <tr><td style="padding:28px 32px;text-align:center;border-bottom:1px solid #243466;">
-        <img src="https://shauryashub.dev/email-logo.png" alt="Shaurya's Hub" width="220" style="display:block;margin:0 auto;max-width:220px;height:auto;">
-      </td></tr>
-      <tr><td style="padding:32px;color:#F5F1E8;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;">
-        ${innerHtml}
-      </td></tr>
-      <tr><td style="padding:18px 32px;border-top:1px solid #243466;text-align:center;">
-        <span style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#6C7BA3;">Sent from shauryashub.dev</span>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>`;
-}
-
-async function sendNotificationEmail(env, toEmail, subject, text, html) {
-  if (!toEmail) return;
-  try {
-    await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
-        to: toEmail,
-        subject,
-        text,
-        html: wrapEmailHtml(html),
-      }),
-    });
-  } catch (e) {
-    // Notification emails are a courtesy, not critical — a failed send here
-    // shouldn't block the actual action (revoke/delete/etc.) from completing.
-  }
-}
-
-// Emails every guest who left an address, whenever the hub closes — covers
-// both a manual maintenance toggle and the panic-button lockdown.
-async function notifyAllGuestsShutdown(env, message) {
-  const list = await env.GUEST_KV.list({ prefix: 'guest:' });
-  for (const key of list.keys) {
-    const raw = await env.GUEST_KV.get(key.name);
-    if (!raw) continue;
-    const guest = JSON.parse(raw);
-    if (!guest.email) continue;
-    await sendNotificationEmail(
-      env, guest.email,
-      "Shaurya's Hub is temporarily closed",
-      `The hub has been temporarily closed.${message ? ' ' + message : ''}`,
-      `<p>The hub has been temporarily closed.${message ? ' ' + escapeHtml(message) : ''}</p>`
-    );
-  }
-}
-
-// A Durable Object: unlike the rest of this Worker, this stays alive between
-// requests and holds open WebSocket connections, so messages can be pushed
-// instantly instead of everyone having to poll and ask "anything new?"
-export class ChatRoom extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.connections = new Map(); // WebSocket -> username
-    this.tttState = this.freshTttState();
-    this.connect4State = this.freshConnect4State();
-    this.wordChainState = this.freshWordChainState();
-  }
-
-  freshTttState() {
-    return { board: Array(9).fill(null), turn: 'X', players: { X: null, O: null }, winner: null };
-  }
-
-  freshConnect4State() {
-    return { board: Array(42).fill(null), turn: 'red', players: { red: null, yellow: null }, winner: null };
-  }
-
-  freshWordChainState() {
-    return { chain: [], turn: null, players: { first: null, second: null } };
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const username = (url.searchParams.get('username') || 'Anonymous').slice(0, 40);
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
-    this.connections.set(server, username);
-
-    this.broadcast({ type: 'system', text: `${username} joined the chat.` });
-    this.broadcastPresence();
-    // Bring a new connection up to speed on any games already in progress
-    try { server.send(JSON.stringify({ type: 'ttt_state', state: this.tttState })); } catch (e) { /* ignore */ }
-    try { server.send(JSON.stringify({ type: 'connect4_state', state: this.connect4State })); } catch (e) { /* ignore */ }
-    try { server.send(JSON.stringify({ type: 'wordchain_state', state: this.wordChainState })); } catch (e) { /* ignore */ }
-
-    server.addEventListener('message', (event) => {
-      let data;
-      try { data = JSON.parse(event.data); } catch (e) { return; }
-
-      if (data.type === 'chat' && typeof data.text === 'string' && data.text.trim()) {
-        this.broadcast({
-          type: 'chat',
-          username,
-          text: data.text.slice(0, 500),
-          timestamp: Date.now(),
-        });
-      } else if (data.type === 'dm' && typeof data.ciphertext === 'string' && typeof data.iv === 'string' && typeof data.to === 'string') {
-        // The server only ever sees and relays ciphertext here — it has no way to
-        // read the actual message content, that's the whole point of doing the
-        // encryption/decryption entirely on each person's own device.
-        const payload = {
-          type: 'dm',
-          from: username,
-          to: data.to,
-          ciphertext: data.ciphertext.slice(0, 4000), // generous cap - base64 ciphertext runs longer than the original plaintext
-          iv: data.iv.slice(0, 64),
-          timestamp: Date.now(),
-        };
-        let delivered = false;
-        this.connections.forEach((connUsername, ws) => {
-          if (connUsername === data.to) {
-            try { ws.send(JSON.stringify(payload)); delivered = true; } catch (e) { /* ignore */ }
-          }
-        });
-        // Echo back to the sender too, so their own conversation view shows it (and knows if it landed)
-        try { server.send(JSON.stringify({ ...payload, delivered })); } catch (e) { /* ignore */ }
-      } else if (data.type === 'typing' || data.type === 'stopped_typing') {
-        const context = data.to ? 'dm' : 'live';
-        const payload = { type: data.type, from: username, context };
-        this.connections.forEach((connUsername, ws) => {
-          if (ws === server) return; // never echo typing back to yourself
-          if (context === 'dm') {
-            if (connUsername === data.to) {
-              try { ws.send(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-            }
-          } else {
-            try { ws.send(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-          }
-        });
-      } else if (data.type === 'dm_read' && typeof data.to === 'string') {
-        const payload = { type: 'dm_read', from: username };
-        this.connections.forEach((connUsername, ws) => {
-          if (connUsername === data.to) {
-            try { ws.send(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-          }
-        });
-      } else if (data.type === 'cursor_move' && typeof data.x === 'number' && typeof data.y === 'number' && typeof data.page === 'string') {
-        this.broadcastExcept(server, { type: 'cursor_move', from: username, x: data.x, y: data.y, page: data.page });
-      } else if (data.type === 'ttt_join') {
-        this.handleTttJoin(username);
-      } else if (data.type === 'ttt_move' && typeof data.cell === 'number') {
-        this.handleTttMove(username, data.cell);
-      } else if (data.type === 'ttt_reset') {
-        this.tttState = this.freshTttState();
-        this.broadcast({ type: 'ttt_state', state: this.tttState });
-      } else if (data.type === 'connect4_join') {
-        this.handleConnect4Join(username);
-      } else if (data.type === 'connect4_move' && typeof data.col === 'number') {
-        this.handleConnect4Move(username, data.col);
-      } else if (data.type === 'connect4_reset') {
-        this.connect4State = this.freshConnect4State();
-        this.broadcast({ type: 'connect4_state', state: this.connect4State });
-      } else if (data.type === 'wordchain_join') {
-        this.handleWordChainJoin(username);
-      } else if (data.type === 'wordchain_move' && typeof data.word === 'string') {
-        this.handleWordChainMove(username, data.word);
-      } else if (data.type === 'wordchain_reset') {
-        this.wordChainState = this.freshWordChainState();
-        this.broadcast({ type: 'wordchain_state', state: this.wordChainState });
-      } else if (data.type === 'whiteboard_draw' && data.stroke) {
-        this.broadcastExcept(server, { type: 'whiteboard_draw', stroke: data.stroke });
-      } else if (data.type === 'whiteboard_clear') {
-        this.broadcast({ type: 'whiteboard_clear' });
-      } else if (typeof data.type === 'string' && data.type.indexOf('voice_') === 0 && typeof data.to === 'string') {
-        // Voice call signaling (offers, answers, ICE candidates, ring/end) — just relay to the intended recipient
-        const payload = { ...data, from: username };
-        this.connections.forEach((connUsername, ws) => {
-          if (connUsername === data.to) {
-            try { ws.send(JSON.stringify(payload)); } catch (e) { /* ignore */ }
-          }
-        });
-      }
-    });
-
-    server.addEventListener('close', () => {
-      this.connections.delete(server);
-      this.broadcast({ type: 'system', text: `${username} left the chat.` });
-      this.broadcastPresence();
-
-      // A player leaving mid-game resets it, rather than leaving the other person stuck waiting forever
-      if (this.tttState.players.X === username || this.tttState.players.O === username) {
-        this.tttState = this.freshTttState();
-        this.broadcast({ type: 'ttt_state', state: this.tttState });
-      }
-      if (this.connect4State.players.red === username || this.connect4State.players.yellow === username) {
-        this.connect4State = this.freshConnect4State();
-        this.broadcast({ type: 'connect4_state', state: this.connect4State });
-      }
-      if (this.wordChainState.players.first === username || this.wordChainState.players.second === username) {
-        this.wordChainState = this.freshWordChainState();
-        this.broadcast({ type: 'wordchain_state', state: this.wordChainState });
-      }
-    });
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  broadcast(messageObj) {
-    const payload = JSON.stringify(messageObj);
-    this.connections.forEach((username, ws) => {
-      try { ws.send(payload); } catch (e) { /* connection likely already closed */ }
-    });
-  }
-
-  broadcastPresence() {
-    const users = Array.from(new Set(Array.from(this.connections.values())));
-    this.broadcast({ type: 'presence', count: this.connections.size, users });
-  }
-
-  broadcastExcept(excludeWs, messageObj) {
-    const payload = JSON.stringify(messageObj);
-    this.connections.forEach((username, ws) => {
-      if (ws === excludeWs) return;
-      try { ws.send(payload); } catch (e) { /* connection likely already closed */ }
-    });
-  }
-
-  // ---- Live Tic-Tac-Toe: one shared game — first two distinct people to join take X and O, everyone else spectates ----
-  handleTttJoin(username) {
-    const s = this.tttState;
-    if (!s.players.X) {
-      s.players.X = username;
-    } else if (!s.players.O && s.players.X !== username) {
-      s.players.O = username;
-    }
-    this.broadcast({ type: 'ttt_state', state: s });
-  }
-
-  handleTttMove(username, cell) {
-    const s = this.tttState;
-    if (s.winner) return;
-    const mySymbol = s.players.X === username ? 'X' : (s.players.O === username ? 'O' : null);
-    if (!mySymbol || mySymbol !== s.turn) return;
-    if (cell < 0 || cell > 8 || s.board[cell] !== null) return;
-
-    s.board[cell] = mySymbol;
-    const winner = this.checkTttWinner(s.board);
-    if (winner) {
-      s.winner = winner;
-    } else {
-      s.turn = s.turn === 'X' ? 'O' : 'X';
-    }
-    this.broadcast({ type: 'ttt_state', state: s });
-  }
-
-  checkTttWinner(board) {
-    const lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-    for (const [a, b, c] of lines) {
-      if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
-    }
-    if (board.every(v => v)) return 'draw';
-    return null;
-  }
-
-  // ---- Live Connect 4: same shared-game pattern, 7 columns x 6 rows, flat array (row*7+col) ----
-  handleConnect4Join(username) {
-    const s = this.connect4State;
-    if (!s.players.red) {
-      s.players.red = username;
-    } else if (!s.players.yellow && s.players.red !== username) {
-      s.players.yellow = username;
-    }
-    this.broadcast({ type: 'connect4_state', state: s });
-  }
-
-  handleConnect4Move(username, col) {
-    const s = this.connect4State;
-    if (s.winner) return;
-    const myColor = s.players.red === username ? 'red' : (s.players.yellow === username ? 'yellow' : null);
-    if (!myColor || myColor !== s.turn) return;
-    if (col < 0 || col > 6) return;
-
-    let targetRow = -1;
-    for (let row = 5; row >= 0; row--) {
-      if (s.board[row * 7 + col] === null) { targetRow = row; break; }
-    }
-    if (targetRow === -1) return; // column full
-
-    s.board[targetRow * 7 + col] = myColor;
-    const winner = this.checkConnect4Winner(s.board);
-    if (winner) {
-      s.winner = winner;
-    } else if (s.board.every(v => v)) {
-      s.winner = 'draw';
-    } else {
-      s.turn = s.turn === 'red' ? 'yellow' : 'red';
-    }
-    this.broadcast({ type: 'connect4_state', state: s });
-  }
-
-  checkConnect4Winner(board) {
-    const rows = 6, cols = 7;
-    const get = (r, c) => board[r * cols + c];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const v = get(r, c);
-        if (!v) continue;
-        if (c + 3 < cols && v === get(r, c+1) && v === get(r, c+2) && v === get(r, c+3)) return v;
-        if (r + 3 < rows && v === get(r+1, c) && v === get(r+2, c) && v === get(r+3, c)) return v;
-        if (r + 3 < rows && c + 3 < cols && v === get(r+1, c+1) && v === get(r+2, c+2) && v === get(r+3, c+3)) return v;
-        if (r + 3 < rows && c - 3 >= 0 && v === get(r+1, c-1) && v === get(r+2, c-2) && v === get(r+3, c-3)) return v;
-      }
-    }
-    return null;
-  }
-
-  // ---- Live Word Chain: same shared-game pattern, no AI — just two real people taking turns ----
-  handleWordChainJoin(username) {
-    const s = this.wordChainState;
-    if (!s.players.first) {
-      s.players.first = username;
-      s.turn = username;
-    } else if (!s.players.second && s.players.first !== username) {
-      s.players.second = username;
-    }
-    this.broadcast({ type: 'wordchain_state', state: s });
-  }
-
-  handleWordChainMove(username, word) {
-    const s = this.wordChainState;
-    if (!s.players.first || !s.players.second) return; // needs both players present
-    if (username !== s.turn) return;
-
-    const trimmed = word.trim();
-    if (!trimmed || /\s/.test(trimmed)) return; // one word only, no spaces
-    const lower = trimmed.toLowerCase();
-    if (s.chain.some(w => w.toLowerCase() === lower)) return; // no repeats
-
-    s.chain.push(trimmed.slice(0, 40));
-    s.turn = s.turn === s.players.first ? s.players.second : s.players.first;
-    this.broadcast({ type: 'wordchain_state', state: s });
-  }
-}
-
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    // Browsers request this directly for the tab icon — needs to be fetchable
-    // without logging in first, and there's nothing sensitive in it.
-    if (url.pathname === '/favicon.ico') {
-      return fetch(request);
-    }
-
-    // Email clients load this directly when rendering emails — they can't log in,
-    // so it needs to be public too. Nothing sensitive in a logo image.
-    if (url.pathname === '/email-logo.png') {
-      return fetch(request);
-    }
-
-    if (url.pathname === '/robots.txt') {
-      return new Response('User-agent: *\nAllow: /\nAllow: /signup\n', {
-        status: 200,
-        headers: { 'Content-Type': 'text/plain' },
-      });
-    }
-
-    if (url.pathname === '/signup') {
-      return handleSignup(request, env);
-    }
-
-    if (url.pathname === '/signup/verify' && request.method === 'POST') {
-      return handleSignupVerify(request, env);
-    }
-
-    if (url.pathname === '/signup/oauth/github') {
-      return handleGithubOAuthStart(request, env);
-    }
-
-    if (url.pathname === '/signup/oauth/github/callback') {
-      return handleGithubOAuthCallback(request, env);
-    }
-
-    if (url.pathname === '/__chat_ws') {
-      const upgradeHeader = request.headers.get('Upgrade');
-      if (!upgradeHeader || upgradeHeader !== 'websocket') {
-        return new Response('Expected a WebSocket connection', { status: 426 });
-      }
-      const id = env.CHAT_ROOM.idFromName('main-room');
-      const stub = env.CHAT_ROOM.get(id);
-      return stub.fetch(request);
-    }
-
-    if (url.pathname === '/admin') {
-      return handleAdmin(request, env);
-    }
-
-    if (url.pathname === '/admin/email') {
-      return handleAdminEmail(request, env);
-    }
-
-    if (url.pathname === '/admin/confirm-password') {
-      return handleConfirmPassword(request, env);
-    }
-
-    if (url.pathname === '/admin/confirm-panic') {
-      return handleConfirmPanic(request, env);
-    }
-
-    if (url.pathname === '/__get_turn_credentials' && request.method === 'POST') {
-      const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = ['https://shauryashub.dev', 'https://www.shauryashub.dev'];
-      if (!allowedOrigins.includes(origin)) {
-        return new Response(JSON.stringify({ ok: false, error: 'Not allowed.' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      try {
-        const response = await fetch(
-          `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${env.TURN_KEY_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ ttl: 3600 }), // an hour is plenty for one call
-          }
-        );
-        const data = await response.json();
-        if (!response.ok) {
-          return new Response(JSON.stringify({ ok: false, error: 'Could not get call credentials.' }), {
-            status: 200, headers: { 'Content-Type': 'application/json' },
-          });
-        }
-        return new Response(JSON.stringify({ ok: true, iceServers: data.iceServers }), {
-          status: 200, headers: { 'Content-Type': 'application/json' },
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ ok: false, error: 'Could not get call credentials.' }), {
-          status: 200, headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
-
-    if (url.pathname === '/__create_time_capsule' && request.method === 'POST') {
-      const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = ['https://shauryashub.dev', 'https://www.shauryashub.dev'];
-      if (!allowedOrigins.includes(origin)) {
-        return new Response(JSON.stringify({ ok: false, error: 'Not allowed.' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      const body = await request.json().catch(() => ({}));
-      const email = (body.email || '').trim();
-      const message = (body.message || '').trim();
-      const day = body.day;
-      const month = body.month;
-      const year = body.year;
-
-      if (!email || !message || !day || !month || !year) {
-        return new Response(JSON.stringify({ ok: false, error: 'Fill in the email, message, and a full date first.' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      const deliverAt = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T09:00:00`;
-      if (new Date(deliverAt).getTime() <= Date.now()) {
-        return new Response(JSON.stringify({ ok: false, error: 'Pick a date in the future.' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      const id = crypto.randomUUID();
-      await env.GUEST_KV.put(
-        'capsule:' + id,
-        JSON.stringify({ email, message, deliverAt, createdAt: new Date().toISOString() })
-      );
-
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__check_access') {
-      const username = url.searchParams.get('u') || '';
-      const raw = await env.GUEST_KV.get('guest:' + username);
-      const guest = raw ? JSON.parse(raw) : null;
-      const guestActive = guest ? !!guest.active && !isGuestExpired(guest) : false;
-
-      const maintenanceRaw = await env.GUEST_KV.get('site:maintenance');
-      const maintenanceOn = maintenanceRaw ? !!JSON.parse(maintenanceRaw).enabled : false;
-
-      const active = guestActive && !maintenanceOn;
-      return new Response(JSON.stringify({ active }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__report_activity' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const username = body.username || '';
-      const view = body.view || '';
-      if (username) {
-        // expirationTtl means a closed tab's presence naturally clears itself after a few minutes
-        await env.GUEST_KV.put(
-          'activity:' + username,
-          JSON.stringify({ view, timestamp: Date.now() }),
-          { expirationTtl: 300 }
-        );
-      }
-      return new Response('ok', { status: 200 });
-    }
-
-    if (url.pathname === '/__ai_conv_list' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const raw = await env.GUEST_KV.get('ai_conv_index:' + key);
-      const index = raw ? JSON.parse(raw) : [];
-      index.sort((a, b) => b.updatedAt - a.updatedAt);
-      return new Response(JSON.stringify({ conversations: index }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_load' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      const raw = id ? await env.GUEST_KV.get('ai_conv:' + key + ':' + id) : null;
-      const messages = raw ? JSON.parse(raw).messages : [];
-      return new Response(JSON.stringify({ messages }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_save' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const messages = Array.isArray(body.messages) ? body.messages.slice(-200) : [];
-      const id = body.id || crypto.randomUUID();
-
-      const firstUserMsg = messages.find(m => m.role === 'user');
-      const autoTitle = firstUserMsg
-        ? (firstUserMsg.content.length > 40 ? firstUserMsg.content.slice(0, 40) + '…' : firstUserMsg.content)
-        : 'New chat';
-
-      await env.GUEST_KV.put('ai_conv:' + key + ':' + id, JSON.stringify({ messages }));
-
-      const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-      const index = indexRaw ? JSON.parse(indexRaw) : [];
-      const existing = index.find(c => c.id === id);
-      const updatedAt = Date.now();
-      let title = autoTitle;
-      if (existing) {
-        // Once renamed, the auto-generated title should never silently overwrite it again
-        title = existing.titleIsCustom ? existing.title : autoTitle;
-        existing.title = title;
-        existing.updatedAt = updatedAt;
-      } else {
-        index.push({ id, title, updatedAt, pinned: false, titleIsCustom: false });
-      }
-      await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
-
-      return new Response(JSON.stringify({ ok: true, id, title }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_rename' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      const newTitle = (body.title || '').trim().slice(0, 60);
-      if (id && newTitle) {
-        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-        const index = indexRaw ? JSON.parse(indexRaw) : [];
-        const entry = index.find(c => c.id === id);
-        if (entry) {
-          entry.title = newTitle;
-          entry.titleIsCustom = true;
-          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
-        }
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_pin' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      if (id) {
-        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-        const index = indexRaw ? JSON.parse(indexRaw) : [];
-        const entry = index.find(c => c.id === id);
-        if (entry) {
-          entry.pinned = !entry.pinned;
-          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
-        }
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_delete' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      if (id) {
-        await env.GUEST_KV.delete('ai_conv:' + key + ':' + id);
-        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-        const index = indexRaw ? JSON.parse(indexRaw) : [];
-        const filtered = index.filter(c => c.id !== id);
-        await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(filtered));
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_conv_set_project' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      const projectId = body.projectId || null; // null means "no project" / ungrouped
-      if (id) {
-        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-        const index = indexRaw ? JSON.parse(indexRaw) : [];
-        const entry = index.find(c => c.id === id);
-        if (entry) {
-          entry.projectId = projectId;
-          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
-        }
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_project_list' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const raw = await env.GUEST_KV.get('ai_projects:' + key);
-      const projects = raw ? JSON.parse(raw) : [];
-      return new Response(JSON.stringify({ projects }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_project_create' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const name = (body.name || '').trim().slice(0, 60);
-      if (!name) {
-        return new Response(JSON.stringify({ error: 'no name provided' }), {
-          status: 400, headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      const raw = await env.GUEST_KV.get('ai_projects:' + key);
-      const projects = raw ? JSON.parse(raw) : [];
-      const project = { id: crypto.randomUUID(), name, createdAt: Date.now() };
-      projects.push(project);
-      await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(projects));
-      return new Response(JSON.stringify({ ok: true, project }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_project_rename' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      const newName = (body.name || '').trim().slice(0, 60);
-      if (id && newName) {
-        const raw = await env.GUEST_KV.get('ai_projects:' + key);
-        const projects = raw ? JSON.parse(raw) : [];
-        const project = projects.find(p => p.id === id);
-        if (project) {
-          project.name = newName;
-          await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(projects));
-        }
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_project_delete' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const id = body.id || '';
-      if (id) {
-        const raw = await env.GUEST_KV.get('ai_projects:' + key);
-        const projects = raw ? JSON.parse(raw) : [];
-        const filtered = projects.filter(p => p.id !== id);
-        await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(filtered));
-
-        // Un-group any conversations that were in this project, rather than
-        // silently deleting the conversations themselves along with it
-        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
-        const index = indexRaw ? JSON.parse(indexRaw) : [];
-        let changed = false;
-        for (const entry of index) {
-          if (entry.projectId === id) {
-            entry.projectId = null;
-            changed = true;
-          }
-        }
-        if (changed) {
-          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
-        }
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_memory_load' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const notes = await env.GUEST_KV.get('ai_memory:' + key);
-      return new Response(JSON.stringify({ notes: notes || '' }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_memory_save' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const newNotes = (body.notes || '').trim();
-      if (newNotes) {
-        const existing = (await env.GUEST_KV.get('ai_memory:' + key)) || '';
-        const combined = existing ? existing + '\n' + newNotes : newNotes;
-        // Cap total length — keep the most recent notes, trim from the oldest end
-        const capped = combined.length > 2000 ? combined.slice(combined.length - 2000) : combined;
-        await env.GUEST_KV.put('ai_memory:' + key, capped);
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__ai_memory_delete' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      await env.GUEST_KV.delete('ai_memory:' + key);
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__pubkey_register' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const publicKeyJwk = body.publicKeyJwk;
-      if (!publicKeyJwk) {
-        return new Response(JSON.stringify({ error: 'no key provided' }), {
-          status: 400, headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      // Public keys are, by definition, safe to store openly — only the matching
-      // private key (which never leaves the owner's own browser) can decrypt anything.
-      await env.GUEST_KV.put('pubkey:' + key, JSON.stringify(publicKeyJwk));
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__pubkey_fetch' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const key = aiHistoryKey(body.username);
-      const raw = await env.GUEST_KV.get('pubkey:' + key);
-      return new Response(JSON.stringify({ publicKeyJwk: raw ? JSON.parse(raw) : null }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (url.pathname === '/__admin_refresh' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const ownerUser = body.owner_username || '';
-      const ownerPass = body.owner_password || '';
-      if (!(await isOwner(env, ownerUser, ownerPass))) {
-        return new Response(JSON.stringify({ error: 'unauthorized' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      const rowsHtml = await buildGuestRowsHtml(env, ownerUser, ownerPass);
-      return new Response(JSON.stringify({ rowsHtml }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    return handleMainSite(request, env);
-  },
-
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(deliverDueCapsules(env));
-  },
-};
-
-async function deliverDueCapsules(env) {
-  const list = await env.GUEST_KV.list({ prefix: 'capsule:' });
-  const now = Date.now();
-
-  for (const key of list.keys) {
-    const raw = await env.GUEST_KV.get(key.name);
-    if (!raw) continue;
-
-    const capsule = JSON.parse(raw);
-    if (new Date(capsule.deliverAt).getTime() > now) continue; // not due yet
-
-    try {
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `Time Capsule <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
-          to: capsule.email,
-          subject: 'A message from your past self has arrived',
-          text: capsule.message,
-          html: wrapEmailHtml(`<p>${escapeHtml(capsule.message).replace(/\n/g, '<br>')}</p>`),
-        }),
-      });
-      if (response.ok) {
-        await env.GUEST_KV.delete(key.name);
-      }
-      // if it failed, leave it in place — the next scheduled run will retry it
-    } catch (e) {
-      // leave it, will retry next scheduled run
-    }
-  }
-}
-
-async function handleMainSite(request, env) {
-  const maintenanceRaw = await env.GUEST_KV.get('site:maintenance');
-  const maintenance = maintenanceRaw ? JSON.parse(maintenanceRaw) : { enabled: false, message: '' };
-  if (maintenance.enabled) {
-    return new Response(maintenancePage(maintenance.message), {
-      status: 503,
-      headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  if (request.method === 'POST') {
-    const formData = await request.formData();
-    const username = formData.get('username') || '';
-    const password = formData.get('password') || '';
-
-    // Owner credentials
-    if (await isOwner(env, username, password)) {
-      const previewAs = formData.get('preview_as');
-      if (previewAs) {
-        const previewRaw = await env.GUEST_KV.get('guest:' + previewAs);
-        const previewGuest = previewRaw ? JSON.parse(previewRaw) : null;
-        const allowedHubs = previewGuest ? (previewGuest.allowedHubs || []) : [];
-        return serveSiteWithPoller(request, true, previewAs, allowedHubs, previewGuest?.firstName, previewGuest?.lastName);
-      }
-      return serveSiteWithPoller(request, false);
-    }
-
-    // Guest credentials
-    const raw = await env.GUEST_KV.get('guest:' + username);
-    if (raw) {
-      const guest = JSON.parse(raw);
-      if (guest.password === password) {
-        if (!guest.active) {
-          return new Response(loginPage('This access has been revoked.'), {
-            status: 401,
-            headers: { 'Content-Type': 'text/html' },
-          });
-        }
-        if (isGuestExpired(guest)) {
-          return new Response(loginPage('This access has expired.'), {
-            status: 401,
-            headers: { 'Content-Type': 'text/html' },
-          });
-        }
-        guest.accessCount = (guest.accessCount || 0) + 1;
-        guest.lastAccess = new Date().toISOString();
-        await env.GUEST_KV.put('guest:' + username, JSON.stringify(guest));
-        return serveSiteWithPoller(request, true, username, guest.allowedHubs, guest.firstName, guest.lastName);
-      }
-    }
-
-    return new Response(loginPage('Incorrect username or password.'), {
-      status: 401,
-      headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  return new Response(loginPage(), {
-    status: 200,
-    headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-async function serveSiteWithPoller(request, isGuest, username, allowedHubs, firstName, lastName) {
-  const originResponse = await fetch(request.url, { headers: request.headers });
-
-  // Owner never gets kicked, so just pass the page through unmodified.
-  if (!isGuest) return originResponse;
-
-  const contentType = originResponse.headers.get('Content-Type') || '';
-  if (!contentType.includes('text/html')) return originResponse;
-
-  let html = await originResponse.text();
-  const poller = `
-<script>
-  window.__GUEST_USERNAME__ = ${JSON.stringify(username)};
-  window.__GUEST_ALLOWED_HUBS__ = ${JSON.stringify(allowedHubs && allowedHubs.length ? allowedHubs : null)};
-  window.__GUEST_FIRST_NAME__ = ${JSON.stringify(firstName || null)};
-  window.__GUEST_LAST_NAME__ = ${JSON.stringify(lastName || null)};
-</script>
-<script>
-(function(){
-  var checkUrl = '/__check_access?u=' + encodeURIComponent(${JSON.stringify(username)});
-  setInterval(function(){
-    fetch(checkUrl).then(function(r){ return r.json(); }).then(function(data){
-      if(!data.active){ window.location.reload(); }
-    }).catch(function(){});
-  }, 5000);
-})();
-</script>`;
-
-  html = html.includes('<head>') ? html.replace('<head>', '<head>' + poller) : poller + html;
-
-  return new Response(html, {
-    status: originResponse.status,
-    headers: originResponse.headers,
-  });
-}
-
-function isGuestExpired(guest) {
-  return !!(guest.expiresAt && Date.now() > new Date(guest.expiresAt).getTime());
-}
-
-async function generateUniqueUsername(env, firstName, lastName) {
-  // Strip anything that isn't a normal name character before it ever becomes
-  // part of a username — defense in depth, not just relying on escaping at render time.
-  const sanitize = (s) => s.trim().replace(/[^a-zA-Z0-9\s'-]/g, '').replace(/\s+/g, ' ');
-  const first = sanitize(firstName) || 'Guest';
-  const lastClean = sanitize(lastName);
-
-  const firstCapitalized = first.charAt(0).toUpperCase() + first.slice(1);
-  const lastInitial = lastClean ? lastClean.charAt(0).toUpperCase() : 'X';
-  const base = `${firstCapitalized}.${lastInitial}`;
-
-  let candidate = base;
-  let suffix = 2;
-  while (true) {
-    const existingGuest = await env.GUEST_KV.get('guest:' + candidate);
-    const existingRequest = await env.GUEST_KV.get('request:' + candidate);
-    if (!existingGuest && !existingRequest) return candidate;
-    candidate = base + suffix;
-    suffix++;
-  }
-}
-
-async function handleSignup(request, env) {
-  if (request.method === 'POST') {
-    const formData = await request.formData();
-    const firstName = (formData.get('first_name') || '').trim();
-    const lastName = (formData.get('last_name') || '').trim();
-    const email = (formData.get('email') || '').trim();
-
-    if (!firstName || !lastName) {
-      return new Response(signupPage('Please enter both your first and last name.'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    // No email given — nothing to verify, request goes through exactly like before.
-    if (!email) {
-      const username = await generateUniqueUsername(env, firstName, lastName);
-      await env.GUEST_KV.put('request:' + username, JSON.stringify({
-        firstName, lastName, username, email: null, requestedAt: new Date().toISOString(),
-      }));
-      return new Response(signupConfirmPage(username), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    // Email given — hold the request and verify they actually own that inbox first.
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const token = crypto.randomUUID();
-    await env.GUEST_KV.put(
-      'pending_signup:' + token,
-      JSON.stringify({ firstName, lastName, email, otp, expiresAt: Date.now() + 15 * 60 * 1000 }),
-      { expirationTtl: 900 }
-    );
-
-    try {
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
-          to: email,
-          subject: 'Confirm your email — Shaurya\'s Hub',
-          text: `Your verification code is: ${otp}\n\nThis code expires in 15 minutes. If you didn't request access to Shaurya's Hub, you can ignore this email.`,
-          html: wrapEmailHtml(`<p>Your verification code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#E0AC3F;">${otp}</p><p>This code expires in 15 minutes. If you didn't request access to Shaurya's Hub, you can ignore this email.</p>`),
-        }),
-      });
-    } catch (e) {
-      // Even if the email fails to send, still show the entry page — the field-hint
-      // and a resend option (implicit via going back and re-submitting) cover this.
-    }
-
-    return new Response(otpEntryPage(email, token), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  return new Response(signupPage(), {
-    status: 200, headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-async function handleSignupVerify(request, env) {
-  const formData = await request.formData();
-  const token = formData.get('token') || '';
-  const otpInput = (formData.get('otp') || '').trim();
-
-  const raw = await env.GUEST_KV.get('pending_signup:' + token);
-  if (!raw) {
-    return new Response(signupPage('That verification link expired — please start again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const pending = JSON.parse(raw);
-  if (Date.now() > pending.expiresAt) {
-    await env.GUEST_KV.delete('pending_signup:' + token);
-    return new Response(signupPage('That code expired — please start again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  if (otpInput !== pending.otp) {
-    return new Response(otpEntryPage(pending.email, token, 'That code didn\'t match — try again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const username = await generateUniqueUsername(env, pending.firstName, pending.lastName);
-  await env.GUEST_KV.put('request:' + username, JSON.stringify({
-    firstName: pending.firstName, lastName: pending.lastName, username,
-    email: pending.email, requestedAt: new Date().toISOString(),
-  }));
-  await env.GUEST_KV.delete('pending_signup:' + token);
-
-  return new Response(signupConfirmPage(username), {
-    status: 200, headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-async function handleGithubOAuthStart(request, env) {
-  const state = crypto.randomUUID();
-  await env.GUEST_KV.put(
-    'oauth_state:' + state,
-    JSON.stringify({ provider: 'github', createdAt: Date.now() }),
-    { expirationTtl: 600 }
-  );
-
-  const redirectUri = 'https://shauryashub.dev/signup/oauth/github/callback';
-  const authUrl = new URL('https://github.com/login/oauth/authorize');
-  authUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('scope', 'read:user user:email');
-  authUrl.searchParams.set('state', state);
-
-  return Response.redirect(authUrl.toString(), 302);
-}
-
-async function handleGithubOAuthCallback(request, env) {
-  const url = new URL(request.url);
-  const code = url.searchParams.get('code');
-  const state = url.searchParams.get('state');
-
-  if (!code || !state) {
-    return new Response(signupPage('GitHub sign-in was cancelled or failed — please try again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  // The state check is this flow's only CSRF protection, since the site has no
-  // session/cookie system — a value only we could have generated, checked for
-  // existence in KV and immediately deleted so it can't be replayed.
-  const stateRaw = await env.GUEST_KV.get('oauth_state:' + state);
-  if (!stateRaw) {
-    return new Response(signupPage('That sign-in link expired — please try again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-  await env.GUEST_KV.delete('oauth_state:' + state);
-
-  const redirectUri = 'https://shauryashub.dev/signup/oauth/github/callback';
-  const tokenUrl = new URL('https://github.com/login/oauth/access_token');
-  tokenUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
-  tokenUrl.searchParams.set('client_secret', env.GITHUB_CLIENT_SECRET);
-  tokenUrl.searchParams.set('code', code);
-  tokenUrl.searchParams.set('redirect_uri', redirectUri);
-
-  const tokenResponse = await fetch(tokenUrl.toString(), {
-    method: 'POST',
-    headers: { 'Accept': 'application/json' },
-  });
-  const tokenData = await tokenResponse.json().catch(() => ({}));
-  if (!tokenData.access_token) {
-    return new Response(signupPage('GitHub sign-in failed — please try again.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const profileResponse = await fetch('https://api.github.com/user', {
-    headers: {
-      'Authorization': `Bearer ${tokenData.access_token}`,
-      'User-Agent': 'Shauryas-Hub',
-      'Accept': 'application/vnd.github+json',
-    },
-  });
-  const profile = await profileResponse.json().catch(() => ({}));
-
-  // The main profile's email field is often null unless the user made it public —
-  // the dedicated emails endpoint gives the actual verified address instead.
-  const emailsResponse = await fetch('https://api.github.com/user/emails', {
-    headers: {
-      'Authorization': `Bearer ${tokenData.access_token}`,
-      'User-Agent': 'Shauryas-Hub',
-      'Accept': 'application/vnd.github+json',
-    },
-  });
-  const emailsData = await emailsResponse.json().catch(() => []);
-  const emails = Array.isArray(emailsData) ? emailsData : [];
-  const verifiedEmail = (emails.find(e => e.primary && e.verified) || emails.find(e => e.verified) || {}).email;
-  const email = verifiedEmail || profile.email || null;
-
-  // GitHub gives one combined display name, not separate first/last — split it
-  // as best as possible, falling back to their username where needed.
-  const fullName = (profile.name || profile.login || 'GitHub User').trim();
-  const nameParts = fullName.split(/\s+/);
-  const firstName = nameParts[0];
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : (profile.login || 'X');
-
-  const username = await generateUniqueUsername(env, firstName, lastName);
-  await env.GUEST_KV.put('request:' + username, JSON.stringify({
-    firstName, lastName, username, email: email || null,
-    requestedAt: new Date().toISOString(), signupMethod: 'github',
-  }));
-
-  return new Response(signupConfirmPage(username), {
-    status: 200, headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-function signupPage(error) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Request Access — Shaurya's Hub</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;}
-  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:300px;}
-  h1{color:#F5F1E8;font-size:20px;margin:0 0 8px 0;text-align:center;}
-  .sub{color:#8B9BC4;font-size:12.5px;text-align:center;margin-bottom:20px;line-height:1.5;}
-  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:14px;}
-  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
-  .field-hint{color:#6C7BA3;font-size:11px;margin-top:-8px;margin-bottom:12px;line-height:1.4;}
-  .back-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
-  .back-link:hover{color:#E0AC3F;}
-  .oauth-btn{
-    display:block;width:100%;box-sizing:border-box;text-align:center;
-    padding:10px;border-radius:6px;font-weight:600;font-size:14px;
-    text-decoration:none;margin-bottom:14px;transition:opacity .15s ease;
-  }
-  .oauth-btn:hover{opacity:0.85;}
-  .github-btn{
-    background:#fff;color:#1a1a1a;display:flex;align-items:center;justify-content:center;gap:10px;
-  }
-  .oauth-divider{text-align:center;color:#6C7BA3;font-size:11px;margin:2px 0 16px 0;text-transform:uppercase;letter-spacing:.05em;}
-</style>
-</head>
-<body>
-  <form class="card" method="POST">
-    <h1>Request Access</h1>
-    <div class="sub">Ask for access to Shaurya's Hub — tell me who you are and I'll take a look.</div>
-    ${error ? `<div class="error">${error}</div>` : ''}
-    <a href="/signup/oauth/github" class="oauth-btn github-btn"><svg width="20" height="20" viewBox="0 0 16 16" fill="#1a1a1a"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>Sign in with GitHub</a>
-    <div class="oauth-divider">or fill in manually</div>
-    <input type="text" name="first_name" placeholder="First name" autofocus required>
-    <input type="text" name="last_name" placeholder="Last name" required>
-    <input type="email" name="email" placeholder="Email (optional)">
-    <div class="field-hint">If you leave your email, you'll get a note when your request is accepted or denied.</div>
-    <button type="submit">Send Request</button>
-    <a class="back-link" href="/">Back to sign in</a>
-  </form>
-</body>
-</html>`;
-}
-
-function otpEntryPage(email, token, error) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Confirm Your Email — Shaurya's Hub</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;}
-  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:300px;}
-  h1{color:#F5F1E8;font-size:20px;margin:0 0 8px 0;text-align:center;}
-  .sub{color:#8B9BC4;font-size:12.5px;text-align:center;margin-bottom:20px;line-height:1.5;}
-  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:20px;text-align:center;letter-spacing:6px;}
-  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
-  .back-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
-  .back-link:hover{color:#E0AC3F;}
-</style>
-</head>
-<body>
-  <form class="card" method="POST" action="/signup/verify">
-    <h1>Confirm Your Email</h1>
-    <div class="sub">We sent a 6-digit code to <strong>${escapeHtml(email)}</strong> — enter it below.</div>
-    ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
-    <input type="hidden" name="token" value="${escapeHtml(token)}">
-    <input type="text" name="otp" placeholder="123456" inputmode="numeric" maxlength="6" autofocus required>
-    <button type="submit">Confirm</button>
-    <a class="back-link" href="/signup">Start over</a>
-  </form>
-</body>
-</html>`;
-}
-
-function signupConfirmPage(username) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Request Sent — Shaurya's Hub</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;text-align:center;padding:20px;}
-  .card{max-width:340px;}
-  h1{font-size:20px;color:#6FE0A0;margin-bottom:10px;}
-  p{color:#AEB9D4;font-size:14px;line-height:1.6;}
-  .username{color:#E0AC3F;font-weight:700;}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Request Sent</h1>
-    <p>Your request has been sent. If it's approved, your username will be <span class="username">${escapeHtml(username)}</span> — check back or wait to hear from whoever you asked.</p>
-  </div>
-</body>
-</html>`;
-}
-
-async function handleAdmin(request, env) {
-  if (request.method === 'POST') {
-    const formData = await request.formData();
-    const ownerUser = formData.get('owner_username') || '';
-    const ownerPass = formData.get('owner_password') || '';
-
-    if (!(await isOwner(env, ownerUser, ownerPass))) {
-      return new Response(adminLoginPage('Incorrect owner credentials.'), {
-        status: 401,
-        headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    const action = formData.get('action');
-    let createError = null;
-    let emailStatus = null;
-    let panicStatus = null;
-    let passwordChangeStatus = null;
-
-    let justCreated = null;
-
-    if (action === 'create') {
-      const firstName = (formData.get('new_first_name') || '').trim();
-      const lastName = (formData.get('new_last_name') || '').trim();
-      if (!firstName || !lastName) {
-        createError = 'Enter both a first and last name first.';
-      } else {
-        const username = await generateUniqueUsername(env, firstName, lastName);
-        const password = Math.random().toString(36).slice(2, 10);
-
-        const expDay = formData.get('expire_day');
-        const expMonth = formData.get('expire_month');
-        const expYear = formData.get('expire_year');
-        let expiresAt = null;
-        if (expDay && expMonth && expYear) {
-          expiresAt = `${expYear}-${String(expMonth).padStart(2, '0')}-${String(expDay).padStart(2, '0')}T23:59:59`;
-        }
-
-        const allowedHubs = formData.getAll('allowed_hub'); // empty array = no restriction, full access
-        const email = (formData.get('new_email') || '').trim();
-
-        const record = {
-          password, active: true, accessCount: 0, createdAt: new Date().toISOString(),
-          expiresAt, allowedHubs: allowedHubs.length ? allowedHubs : null, email: email || null,
-          firstName, lastName,
-        };
-        await env.GUEST_KV.put('guest:' + username, JSON.stringify(record));
-        justCreated = { username, ...record };
-
-        const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
-          await sendNotificationEmail(
-            env, email,
-            "You've been given access to Shaurya's Hub",
-            `You've been given access to Shaurya's Hub.\n\nWebsite: https://${sendDomain}\nUsername: ${username}\nPassword: ${password}\n\nThis access can be revoked at any time.`,
-            `<p>You've been given access to Shaurya's Hub.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(username)}</strong><br>Password: <strong>${escapeHtml(password)}</strong></p><p>This access can be revoked at any time.</p>`
-          );
-      }
-    } else if (action === 'toggle') {
-      const target = formData.get('target');
-      const raw = await env.GUEST_KV.get('guest:' + target);
-      if (raw) {
-        const guest = JSON.parse(raw);
-        guest.active = !guest.active;
-        await env.GUEST_KV.put('guest:' + target, JSON.stringify(guest));
-        if (!guest.active) {
-          await sendNotificationEmail(
-            env, guest.email,
-            'Your access to Shaurya\'s Hub has been revoked',
-            'Your access has been revoked. If you think this was a mistake, feel free to reach out.',
-            '<p>Your access has been revoked. If you think this was a mistake, feel free to reach out.</p>'
-          );
-        }
-      }
-    } else if (action === 'delete') {
-      const target = formData.get('target');
-      const raw = await env.GUEST_KV.get('guest:' + target);
-      if (raw) {
-        const guest = JSON.parse(raw);
-        await sendNotificationEmail(
-          env, guest.email,
-          'Your account on Shaurya\'s Hub has been deleted',
-          'Your account has been permanently deleted.',
-          '<p>Your account has been permanently deleted.</p>'
-        );
-      }
-      await env.GUEST_KV.delete('guest:' + target);
-      await deleteAllAiConversations(env, target);
-    } else if (action === 'toggle_maintenance') {
-      const raw = await env.GUEST_KV.get('site:maintenance');
-      const current = raw ? JSON.parse(raw) : { enabled: false, message: '' };
-      const newEnabled = !current.enabled;
-      const message = newEnabled ? (formData.get('maintenance_message') || '').trim() : current.message;
-      await env.GUEST_KV.put('site:maintenance', JSON.stringify({ enabled: newEnabled, message }));
-      if (newEnabled) {
-        await notifyAllGuestsShutdown(env, message);
-      }
-    } else if (action === 'request_panic') {
-      const token = crypto.randomUUID();
-      await env.GUEST_KV.put(
-        'panic:pending',
-        JSON.stringify({ token, expiresAt: Date.now() + 30 * 60 * 1000 }),
-        { expirationTtl: 1800 }
-      );
-      try {
-        await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
-            to: env.OWNER_EMAIL,
-            subject: 'Confirm emergency lockdown',
-            text: `A panic lockdown was requested for your admin panel.\n\nOpen this link to review and confirm: https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-panic?token=${token}\n\nThis link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.`,
-            html: wrapEmailHtml(`<p>A panic lockdown was requested for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-panic?token=${token}" style="color:#E0AC3F;">Click here to review and confirm</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`),
-          }),
-        });
-        panicStatus = { ok: true, text: `Confirmation email sent to ${env.OWNER_EMAIL}. Open it to review and confirm — nothing happens until then.` };
-      } catch (e) {
-        panicStatus = { ok: false, text: 'Could not send the confirmation email — try again.' };
-      }
-    } else if (action === 'request_password_change') {
-      const newPassword = formData.get('new_owner_password') || '';
-      if (!newPassword || newPassword.length < 4) {
-        passwordChangeStatus = { ok: false, text: 'Type a new password (at least 4 characters) first.' };
-      } else {
-        const token = crypto.randomUUID();
-        await env.GUEST_KV.put(
-          'owner:pending_change',
-          JSON.stringify({ newPassword, token, expiresAt: Date.now() + 30 * 60 * 1000 }),
-          { expirationTtl: 1800 }
-        );
-        try {
-          await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              from: `Shaurya's Hub <access@${env.SEND_DOMAIN || 'shauryashub.dev'}>`,
-              to: env.OWNER_EMAIL,
-              subject: 'Confirm your password change',
-              text: `Someone (hopefully you) requested a password change for your admin panel.\n\nClick to confirm: https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-password?token=${token}\n\nThis link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.`,
-              html: wrapEmailHtml(`<p>Someone (hopefully you) requested a password change for your admin panel.</p><p><a href="https://${env.SEND_DOMAIN || 'shauryashub.dev'}/admin/confirm-password?token=${token}" style="color:#E0AC3F;">Click here to confirm the change</a></p><p>This link expires in 30 minutes. If you didn't request this, ignore this email and nothing will change.</p>`),
-            }),
-          });
-          passwordChangeStatus = { ok: true, text: `Confirmation email sent to ${env.OWNER_EMAIL}. Click the link there to finish the change.` };
-        } catch (e) {
-          passwordChangeStatus = { ok: false, text: 'Could not send the confirmation email — try again.' };
-        }
-      }
-    } else if (action === 'accept_request') {
-      const target = formData.get('target');
-      const raw = await env.GUEST_KV.get('request:' + target);
-      if (raw) {
-        const req = JSON.parse(raw);
-        const password = Math.random().toString(36).slice(2, 10);
-        const record = {
-          password, active: true, accessCount: 0, createdAt: new Date().toISOString(),
-          expiresAt: null, allowedHubs: null, email: req.email || null,
-          firstName: req.firstName || null, lastName: req.lastName || null,
-        };
-        await env.GUEST_KV.put('guest:' + target, JSON.stringify(record));
-        await env.GUEST_KV.delete('request:' + target);
-        justCreated = { username: target, ...record };
-
-        const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
-        await sendNotificationEmail(
-          env, req.email,
-          "You've been granted access to Shaurya's Hub",
-          `Good news — your access request was accepted.\n\nWebsite: https://${sendDomain}\nUsername: ${target}\nPassword: ${password}\n\nThis access can be revoked at any time.`,
-          `<p>Good news — your access request was accepted.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(target)}</strong><br>Password: <strong>${escapeHtml(password)}</strong></p><p>This access can be revoked at any time.</p>`
-        );
-      }
-    } else if (action === 'deny_request') {
-      const target = formData.get('target');
-      const raw = await env.GUEST_KV.get('request:' + target);
-      if (raw) {
-        const req = JSON.parse(raw);
-        await sendNotificationEmail(
-          env, req.email,
-          'Your access request was not approved',
-          `Your request for access to Shaurya's Hub wasn't approved this time.`,
-          `<p>Your request for access to Shaurya's Hub wasn't approved this time.</p>`
-        );
-      }
-      await env.GUEST_KV.delete('request:' + target);
-    }
-
-    return new Response(await adminPanelPage(env, ownerUser, ownerPass, createError, justCreated, emailStatus, panicStatus, passwordChangeStatus), {
-      status: 200,
-      headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  return new Response(adminLoginPage(), {
-    status: 200,
-    headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-async function handleAdminEmail(request, env) {
-  if (request.method !== 'POST') {
-    return new Response(adminLoginPage(), { status: 200, headers: { 'Content-Type': 'text/html' } });
-  }
-
-  const formData = await request.formData();
-  const ownerUser = formData.get('owner_username') || '';
-  const ownerPass = formData.get('owner_password') || '';
-
-  if (!(await isOwner(env, ownerUser, ownerPass))) {
-    return new Response(adminLoginPage('Incorrect owner credentials.'), {
-      status: 401,
-      headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const target = formData.get('target') || '';
-  const stage = formData.get('stage');
-
-  if (stage === 'send') {
-    const to = (formData.get('compose_to') || '').trim();
-    const fromChoice = formData.get('compose_from') || 'anonymous';
-    const extraMessage = (formData.get('extra_message') || '').trim();
-
-    const raw = await env.GUEST_KV.get('guest:' + target);
-    if (!raw) {
-      return new Response(emailComposePage(ownerUser, ownerPass, target, 'Could not find that guest login anymore.'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-    if (!to) {
-      return new Response(emailComposePage(ownerUser, ownerPass, target, 'Type a recipient email address first.'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    const guest = JSON.parse(raw);
-    const sendDomain = env.SEND_DOMAIN || 'shauryashub.dev';
-    const displayName = fromChoice === 'shaurya' ? 'Shaurya' : 'Anonymous';
-
-    const baseText = `You've been given temporary access to Shaurya's Hub.\n\nWebsite: https://${sendDomain}\nUsername: ${target}\nPassword: ${guest.password}\n\nThis access can be revoked at any time.`;
-    const fullText = extraMessage ? `${baseText}\n\n---\n${extraMessage}` : baseText;
-
-    const baseHtml = `<p>You've been given temporary access to <strong>Shaurya's Hub</strong>.</p><p>Website: <a href="https://${sendDomain}">${sendDomain}</a><br>Username: <strong>${escapeHtml(target)}</strong><br>Password: <strong>${escapeHtml(guest.password)}</strong></p><p>This access can be revoked at any time.</p>`;
-    const fullHtml = extraMessage
-      ? `${baseHtml}<hr>${escapeHtml(extraMessage).replace(/\n/g, '<br>')}`
-      : baseHtml;
-
-    try {
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `${displayName} <access@${sendDomain}>`,
-          to,
-          subject: "You've been given access to Shaurya's Hub",
-          text: fullText,
-          html: wrapEmailHtml(fullHtml),
-        }),
-      });
-      const result = await response.json();
-      if (response.ok) {
-        return new Response(emailSentPage(ownerUser, ownerPass, to), {
-          status: 200, headers: { 'Content-Type': 'text/html' },
-        });
-      }
-      return new Response(emailComposePage(ownerUser, ownerPass, target, result.message || 'Resend rejected the email — check your API key.'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    } catch (e) {
-      return new Response(emailComposePage(ownerUser, ownerPass, target, 'Something went wrong sending the email.'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-  }
-
-  return new Response(emailComposePage(ownerUser, ownerPass, target), {
-    status: 200,
-    headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-async function handleConfirmPassword(request, env) {
-  const url = new URL(request.url);
-  const token = url.searchParams.get('token') || '';
-
-  const raw = await env.GUEST_KV.get('owner:pending_change');
-  if (!raw) {
-    return new Response(confirmResultPage(false, 'This confirmation link is no longer valid — it may have already been used or expired.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const pending = JSON.parse(raw);
-  if (pending.token !== token) {
-    return new Response(confirmResultPage(false, 'This confirmation link is invalid.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-  if (Date.now() > pending.expiresAt) {
-    await env.GUEST_KV.delete('owner:pending_change');
-    return new Response(confirmResultPage(false, 'This confirmation link has expired — request a new password change from /admin.'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  const currentCreds = await getOwnerCredentials(env);
-  await env.GUEST_KV.put('owner:override', JSON.stringify({
-    username: currentCreds.username,
-    password: pending.newPassword,
-  }));
-  await env.GUEST_KV.delete('owner:pending_change');
-
-  return new Response(confirmResultPage(true, 'Your password has been changed. Use it next time you log in.'), {
-    status: 200, headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-function confirmResultPage(success, message, title) {
-  const heading = title || (success ? 'Password Changed' : 'Something Went Wrong');
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Confirmation — Admin</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;text-align:center;padding:20px;}
-  .card{max-width:380px;}
-  h1{font-size:20px;color:${success ? '#6FE0A0' : '#D9584F'};margin-bottom:10px;}
-  p{color:#AEB9D4;font-size:14px;line-height:1.6;}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>${escapeHtml(heading)}</h1>
-    <p>${escapeHtml(message)}</p>
-  </div>
-</body>
-</html>`;
-}
-
-async function handleConfirmPanic(request, env) {
-  const url = new URL(request.url);
-
-  if (request.method === 'POST') {
-    const formData = await request.formData();
-    const token = formData.get('token') || '';
-    const phrase = (formData.get('confirm_phrase') || '').trim();
-
-    const raw = await env.GUEST_KV.get('panic:pending');
-    if (!raw) {
-      return new Response(confirmResultPage(false, 'This confirmation link is no longer valid — it may have already been used or expired.', 'Lockdown Not Confirmed'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    const pending = JSON.parse(raw);
-    if (pending.token !== token) {
-      return new Response(confirmResultPage(false, 'This confirmation link is invalid.', 'Lockdown Not Confirmed'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-    if (Date.now() > pending.expiresAt) {
-      await env.GUEST_KV.delete('panic:pending');
-      return new Response(confirmResultPage(false, 'This confirmation link has expired — request a new lockdown from /admin if you still need it.', 'Lockdown Not Confirmed'), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-    if (phrase !== 'LOCK IT DOWN') {
-      return new Response(panicConfirmPage(token, "That phrase didn't match — type it exactly to confirm."), {
-        status: 200, headers: { 'Content-Type': 'text/html' },
-      });
-    }
-
-    const list = await env.GUEST_KV.list({ prefix: 'guest:' });
-    for (const key of list.keys) {
-      const guestRaw = await env.GUEST_KV.get(key.name);
-      if (!guestRaw) continue;
-      const guest = JSON.parse(guestRaw);
-      guest.active = false;
-      await env.GUEST_KV.put(key.name, JSON.stringify(guest));
-    }
-    const lockdownMessage = 'Access has been temporarily locked down.';
-    await env.GUEST_KV.put('site:maintenance', JSON.stringify({
-      enabled: true,
-      message: lockdownMessage,
-    }));
-    await notifyAllGuestsShutdown(env, lockdownMessage);
-    await env.GUEST_KV.delete('panic:pending');
-
-    return new Response(confirmResultPage(true, 'Every guest login has been revoked and the workspace is now closed.', 'Lockdown Confirmed'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  // GET: show the confirmation page requiring the typed phrase
-  const token = url.searchParams.get('token') || '';
-  const raw = await env.GUEST_KV.get('panic:pending');
-  if (!raw || JSON.parse(raw).token !== token) {
-    return new Response(confirmResultPage(false, 'This confirmation link is invalid or has already been used.', 'Lockdown Not Confirmed'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-  if (Date.now() > JSON.parse(raw).expiresAt) {
-    return new Response(confirmResultPage(false, 'This confirmation link has expired.', 'Lockdown Not Confirmed'), {
-      status: 200, headers: { 'Content-Type': 'text/html' },
-    });
-  }
-
-  return new Response(panicConfirmPage(token), {
-    status: 200, headers: { 'Content-Type': 'text/html' },
-  });
-}
-
-function panicConfirmPage(token, error) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Confirm Emergency Lockdown — Admin</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;padding:20px;}
-  .card{background:#16234F;border:1px solid #D9584F;border-radius:10px;padding:32px;width:340px;box-sizing:border-box;}
-  h1{font-size:18px;margin:0 0 12px 0;color:#D9584F;}
-  p{color:#AEB9D4;font-size:13px;line-height:1.6;margin-bottom:16px;}
-  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:14px;}
-  button{width:100%;background:#D9584F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;}
-</style>
-</head>
-<body>
-  <form class="card" method="POST">
-    <h1>Confirm Emergency Lockdown</h1>
-    <p>This will instantly revoke every guest login and close the workspace to everyone. Type the phrase below exactly to confirm.</p>
-    ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
-    <input type="hidden" name="token" value="${escapeHtml(token)}">
-    <input type="text" name="confirm_phrase" placeholder="Type: LOCK IT DOWN" autofocus required>
-    <button type="submit">Confirm Lockdown</button>
-  </form>
-</body>
-</html>`;
-}
-
-function emailComposePage(ownerUser, ownerPass, target, error) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Email ${escapeHtml(target)} — Admin</title>
-<style>
-  body{margin:0;min-height:100vh;background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;padding:40px 20px;}
-  .wrap{max-width:500px;margin:0 auto;}
-  h1{font-size:20px;margin-bottom:6px;}
-  .sub{color:#6C7BA3;font-size:13px;margin-bottom:24px;}
-  .box{background:#16234F;border:1px solid #243466;border-radius:8px;padding:20px;}
-  .field{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;font-size:14px;width:100%;box-sizing:border-box;margin-bottom:12px;}
-  .field:focus{outline:none;border-color:#E0AC3F;}
-  select.field{margin-bottom:12px;}
-  textarea.field{resize:vertical;font-family:sans-serif;}
-  button.primary{background:#E0AC3F;color:#0E1B3D;border:none;padding:10px 20px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .small-btn{background:#1D2C5C;border:1px solid #243466;color:#F5F1E8;padding:8px 14px;border-radius:5px;
-    cursor:pointer;font-size:13px;}
-  .small-btn:hover{border-color:#E0AC3F;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;}
-  .back-link{color:#6C7BA3;font-size:12px;text-decoration:none;display:inline-block;margin-top:16px;}
-  .back-link:hover{color:#F5F1E8;}
-  .preview{font-size:12px;color:#6C7BA3;background:#0E1B3D;border-radius:6px;padding:12px;margin-bottom:16px;line-height:1.6;}
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>Email guest login: ${escapeHtml(target)}</h1>
-    <div class="sub">This email will automatically include this guest's username and password.</div>
-    <div class="box">
-      ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
-      <div class="preview">Includes: website link, username <strong>${escapeHtml(target)}</strong>, and password — automatically.</div>
-      <form method="POST" action="/admin/email">
-        <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-        <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-        <input type="hidden" name="target" value="${escapeHtml(target)}">
-        <input type="hidden" name="stage" value="send">
-
-        <input type="email" name="compose_to" placeholder="To: recipient@email.com" class="field" required>
-        <select name="compose_from" class="field">
-          <option value="anonymous">From: Anonymous</option>
-          <option value="shaurya">From: Shaurya</option>
-        </select>
-
-        <button type="button" id="revealMsgBtn" class="small-btn">Add Message</button>
-
-        <div id="extraMessageArea" style="display:none;margin-top:12px;">
-          <textarea name="extra_message" class="field" rows="5" placeholder="Optional extra message, added below the login details..."></textarea>
-        </div>
-
-        <div style="margin-top:14px;">
-          <button type="submit" class="primary">Send Email</button>
-        </div>
-      </form>
-    </div>
-    <form method="POST" action="/admin" style="display:inline;">
-      <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-      <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-      <button type="submit" class="back-link" style="background:none;border:none;cursor:pointer;padding:0;">&larr; Back to Admin</button>
-    </form>
-  </div>
-  <script>
-    (function(){
-      var revealBtn = document.getElementById('revealMsgBtn');
-      var msgArea = document.getElementById('extraMessageArea');
-      revealBtn.addEventListener('click', function(){
-        msgArea.style.display = 'block';
-        revealBtn.style.display = 'none';
-      });
-    })();
-  </script>
-</body>
-</html>`;
-}
-
-function emailSentPage(ownerUser, ownerPass, to) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Email Sent — Admin</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;text-align:center;}
-  .card{max-width:360px;padding:20px;}
-  h1{font-size:20px;color:#6FE0A0;margin-bottom:10px;}
-  p{color:#AEB9D4;font-size:14px;margin-bottom:20px;}
-  button{background:#E0AC3F;color:#0E1B3D;border:none;padding:10px 20px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Email sent</h1>
-    <p>Sent to ${escapeHtml(to)}.</p>
-    <form method="POST" action="/admin">
-      <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-      <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-      <button type="submit">Back to Admin</button>
-    </form>
-  </div>
-</body>
-</html>`;
-}
-
-async function buildRequestRowsHtml(env, ownerUser, ownerPass) {
-  const list = await env.GUEST_KV.list({ prefix: 'request:' });
-  if (list.keys.length === 0) {
-    return `<tr><td colspan="4" style="color:#6C7BA3;">No pending requests.</td></tr>`;
-  }
-
-  const rows = await Promise.all(list.keys.map(async (key) => {
-    const raw = await env.GUEST_KV.get(key.name);
-    if (!raw) return '';
-    const req = JSON.parse(raw);
-    const requestedAgo = new Date(req.requestedAt).toLocaleString();
-
-    return `
-      <tr>
-        <td>${escapeHtml(req.firstName)} ${escapeHtml(req.lastName)}</td>
-        <td>${escapeHtml(req.username)}</td>
-        <td>${escapeHtml(requestedAgo)}</td>
-        <td>
-          <form method="POST" style="display:inline;">
-            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="action" value="accept_request">
-            <input type="hidden" name="target" value="${escapeHtml(req.username)}">
-            <button type="submit" class="small-btn">Accept</button>
-          </form>
-          <form method="POST" style="display:inline;">
-            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="action" value="deny_request">
-            <input type="hidden" name="target" value="${escapeHtml(req.username)}">
-            <button type="submit" class="small-btn danger">Deny</button>
-          </form>
-        </td>
-      </tr>
-    `;
-  }));
-
-  return rows.join('');
-}
-
-async function buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated) {
-  const list = await env.GUEST_KV.list({ prefix: 'guest:' });
-  let rows = '';
-  const seenUsernames = new Set();
-
-  function formatTimeAgo(diffMs){
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    return `${hours}h ago`;
-  }
-
-  async function buildRow(username, guest) {
-    const activityRaw = await env.GUEST_KV.get('activity:' + username);
-    let presenceHtml;
-    if (activityRaw) {
-      const activity = JSON.parse(activityRaw);
-      const diff = Date.now() - activity.timestamp;
-      presenceHtml = diff < 15000
-        ? `<span style="color:#6FE0A0;">&#9679; Online &mdash; ${escapeHtml(activity.view || 'unknown page')}</span>`
-        : `<span style="color:#6C7BA3;">Last seen ${formatTimeAgo(diff)}</span>`;
-    } else if (guest.accessCount > 0) {
-      // Their short-lived presence entry expired (5 min TTL), but they have
-      // genuinely logged in before — "never accessed" would be misleading here.
-      presenceHtml = '<span style="color:#6C7BA3;">Not currently online</span>';
-    } else {
-      presenceHtml = '<span style="color:#6C7BA3;">Never accessed</span>';
-    }
-
-    const expired = isGuestExpired(guest);
-    let statusHtml;
-    if (expired) statusHtml = '<span class="revoked">Expired</span>';
-    else if (guest.active) statusHtml = '<span class="active">Active</span>';
-    else statusHtml = '<span class="revoked">Revoked</span>';
-
-    const expiresHtml = guest.expiresAt
-      ? `<span style="color:${expired ? '#D9584F' : '#AEB9D4'};font-size:12px;">${new Date(guest.expiresAt).toLocaleDateString('en-GB')}</span>`
-      : '<span style="color:#6C7BA3;font-size:12px;">Never</span>';
-
-    const restrictedHtml = guest.allowedHubs && guest.allowedHubs.length
-      ? `<span style="color:#5B8DEF;font-size:12px;">${guest.allowedHubs.map(id => escapeHtml((HUB_OPTIONS.find(h => h.id === id) || {}).label || id)).join(', ')}</span>`
-      : '<span style="color:#6C7BA3;font-size:12px;">All</span>';
-
-    return `
-      <tr>
-        <td>${escapeHtml(username)}</td>
-        <td>${escapeHtml(guest.password)}</td>
-        <td>${guest.accessCount || 0}</td>
-        <td>${presenceHtml}</td>
-        <td>${expiresHtml}</td>
-        <td>${restrictedHtml}</td>
-        <td>${statusHtml}</td>
-        <td>
-          <form method="POST" action="/admin" style="display:inline;">
-            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="action" value="toggle">
-            <input type="hidden" name="target" value="${escapeHtml(username)}">
-            <button type="submit" class="small-btn">${guest.active ? 'Revoke' : 'Reactivate'}</button>
-          </form>
-          <form method="POST" action="/admin" style="display:inline;">
-            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="action" value="delete">
-            <input type="hidden" name="target" value="${escapeHtml(username)}">
-            <button type="submit" class="small-btn danger">Delete</button>
-          </form>
-          <form method="POST" action="/admin/email" style="display:inline;">
-            <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="target" value="${escapeHtml(username)}">
-            <button type="submit" class="small-btn">Email</button>
-          </form>
-          <form method="POST" action="/" target="_blank" style="display:inline;">
-            <input type="hidden" name="username" value="${escapeHtml(ownerUser)}">
-            <input type="hidden" name="password" value="${escapeHtml(ownerPass)}">
-            <input type="hidden" name="preview_as" value="${escapeHtml(username)}">
-            <button type="submit" class="small-btn">Preview</button>
-          </form>
-        </td>
-      </tr>
-    `;
-  }
-
-  for (const key of list.keys) {
-    const raw = await env.GUEST_KV.get(key.name);
-    if (!raw) continue; // list() can briefly show a key that was just deleted — skip it
-    const guest = JSON.parse(raw);
-    const username = key.name.replace('guest:', '');
-    seenUsernames.add(username);
-    rows += await buildRow(username, guest);
-  }
-
-  // KV's list() can lag a few seconds behind a write that just happened —
-  // if the guest we just created isn't in the list yet, show it anyway.
-  if (justCreated && !seenUsernames.has(justCreated.username)) {
-    rows = (await buildRow(justCreated.username, justCreated)) + rows;
-  }
-
-  if (!rows) {
-    rows = '<tr><td colspan="8" style="text-align:center;color:#6C7BA3;">No guest logins yet — create one below.</td></tr>';
-  }
-
-  return rows;
-}
-
-async function adminPanelPage(env, ownerUser, ownerPass, createError, justCreated, emailStatus, panicStatus, passwordChangeStatus) {
-  const rows = await buildGuestRowsHtml(env, ownerUser, ownerPass, justCreated);
-  const requestRows = await buildRequestRowsHtml(env, ownerUser, ownerPass);
-  const maintenanceRaw = await env.GUEST_KV.get('site:maintenance');
-  const maintenance = maintenanceRaw ? JSON.parse(maintenanceRaw) : { enabled: false, message: '' };
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guest Access — Admin</title>
-<style>
-  body{margin:0;min-height:100vh;background:#0E1B3D;font-family:sans-serif;color:#F5F1E8;padding:40px 20px;}
-  .wrap{max-width:900px;margin:0 auto;}
-  h1{font-size:22px;margin-bottom:6px;}
-  .sub{color:#6C7BA3;font-size:13px;margin-bottom:28px;}
-  table{width:100%;border-collapse:collapse;background:#16234F;border-radius:8px;overflow:hidden;margin-bottom:24px;}
-  th, td{padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #243466;}
-  th{color:#F0CE85;font-size:11px;text-transform:uppercase;letter-spacing:.05em;}
-  .active{color:#6FE0A0;}
-  .revoked{color:#D9584F;}
-  .small-btn{background:#1D2C5C;border:1px solid #243466;color:#F5F1E8;padding:5px 10px;border-radius:5px;
-    cursor:pointer;font-size:12px;margin-right:4px;}
-  .small-btn.danger:hover{border-color:#D9584F;color:#D9584F;}
-  .small-btn:hover{border-color:#E0AC3F;}
-  form.create{background:#16234F;border-radius:8px;padding:20px;}
-  form.create input[type="text"], form.create input[type="email"]{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;font-size:14px;flex:1;min-width:160px;}
-  form.create input[type="text"]:focus, form.create input[type="email"]:focus{outline:none;border-color:#E0AC3F;}
-  .create-subsection-label{font-size:12px;color:#6C7BA3;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em;}
-  .compose-field-select{background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:8px 10px;border-radius:6px;font-size:13px;flex:1;}
-  .compose-field-select:focus{outline:none;border-color:#E0AC3F;}
-  .create-error{color:#D9584F;font-size:12px;margin-bottom:10px;}
-  .email-status{font-size:12px;margin-bottom:14px;padding:8px 12px;border-radius:6px;}
-  .email-status.ok{color:#6FE0A0;background:rgba(111,224,160,0.1);}
-  .email-status.fail{color:#D9584F;background:rgba(217,88,79,0.1);}
-  button.primary{background:#E0AC3F;color:#0E1B3D;border:none;padding:10px 20px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;flex-shrink:0;}
-  .section-title{font-size:15px;color:#F0CE85;margin:32px 0 12px 0;text-transform:uppercase;letter-spacing:.05em;}
-  .maintenance-box{background:#16234F;border-radius:8px;padding:20px;border:1px solid #243466;}
-  .maintenance-status{font-size:13px;margin-bottom:14px;}
-  .maintenance-status.on{color:#D9584F;}
-  .maintenance-status.off{color:#6FE0A0;}
-  button.danger-primary{background:#D9584F;color:#0E1B3D;border:none;padding:10px 20px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>Request Access</h1>
-    <div class="sub">People who've asked for a login via /signup — accept to create their account, deny to dismiss.</div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead><tr><th>Name</th><th>Username</th><th>Requested</th><th>Actions</th></tr></thead>
-        <tbody id="requestRows">${requestRows}</tbody>
-      </table>
-    </div>
-
-    <h1>Guest Access</h1>
-    <div class="sub">Create temporary logins for friends, see how many times they've used it, revoke anytime.</div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead><tr><th>Username</th><th>Password</th><th>Uses</th><th>Presence</th><th>Expires</th><th>Restricted To</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody id="guestRows">${rows}</tbody>
-      </table>
-    </div>
-    ${emailStatus ? `<div class="email-status ${emailStatus.ok ? 'ok' : 'fail'}">${escapeHtml(emailStatus.text)}</div>` : ''}
-    ${createError ? `<div class="create-error">${escapeHtml(createError)}</div>` : ''}
-    <form method="POST" class="create">
-      <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-      <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-      <input type="hidden" name="action" value="create">
-      <input type="text" name="new_first_name" placeholder="First name" required style="width:100%;box-sizing:border-box;margin-bottom:14px;">
-      <input type="text" name="new_last_name" placeholder="Last name" required style="width:100%;box-sizing:border-box;margin-bottom:14px;">
-      <input type="email" name="new_email" placeholder="Email (optional)" style="width:100%;box-sizing:border-box;margin-bottom:6px;">
-      <div style="color:#6C7BA3;font-size:11px;margin-bottom:14px;line-height:1.4;">If set, they'll get notified about access changes and hub shutdowns.</div>
-
-      <div class="create-subsection-label">Auto-expire (optional — leave blank to never expire)</div>
-      <div style="display:flex;gap:8px;margin-bottom:16px;">
-        <select name="expire_day" class="compose-field-select">
-          <option value="">Day</option>
-          ${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('')}
-        </select>
-        <select name="expire_month" class="compose-field-select">
-          <option value="">Month</option>
-          ${['January','February','March','April','May','June','July','August','September','October','November','December']
-            .map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}
-        </select>
-        <select name="expire_year" class="compose-field-select">
-          <option value="">Year</option>
-          ${Array.from({ length: 4 }, (_, i) => new Date().getFullYear() + i)
-            .map(y => `<option value="${y}">${y}</option>`).join('')}
-        </select>
-      </div>
-
-      <div class="create-subsection-label">Restrict to specific hubs (optional — leave all unchecked for full access)</div>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
-        ${HUB_OPTIONS.map(h => `
-          <label style="font-size:13px;color:#AEB9D4;display:flex;align-items:center;gap:5px;">
-            <input type="checkbox" name="allowed_hub" value="${h.id}"> ${h.label}
-          </label>
-        `).join('')}
-      </div>
-
-      <button type="submit" class="primary">+ Create Guest Login</button>
-    </form>
-
-    <div class="section-title">Maintenance Mode</div>
-    <div class="maintenance-box">
-      <div class="maintenance-status ${maintenance.enabled ? 'on' : 'off'}">
-        ${maintenance.enabled ? 'Currently CLOSED to everyone, including you at the main site.' : 'Currently open as normal.'}
-      </div>
-      <form method="POST">
-        <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-        <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-        <input type="hidden" name="action" value="toggle_maintenance">
-        ${!maintenance.enabled ? `
-          <input type="text" name="maintenance_message" placeholder="Message to show visitors (optional)"
-            style="width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-            padding:10px 12px;border-radius:6px;font-size:14px;margin-bottom:12px;">
-          <button type="submit" class="danger-primary">Close the Workspace</button>
-        ` : `
-          <button type="submit" class="primary">Reopen the Workspace</button>
-        `}
-      </form>
-    </div>
-
-    <div class="section-title">Panic Button</div>
-    <div class="maintenance-box" style="border-color:#D9584F;">
-      <div style="font-size:13px;color:#AEB9D4;margin-bottom:14px;">Instantly revokes every guest login and closes the workspace. Uses your normal login, but requires confirming via an emailed link and typing a phrase before it actually happens — nothing changes until then.</div>
-      ${panicStatus ? `<div class="email-status ${panicStatus.ok ? 'ok' : 'fail'}">${escapeHtml(panicStatus.text)}</div>` : ''}
-      <form method="POST">
-        <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-        <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-        <input type="hidden" name="action" value="request_panic">
-        <button type="submit" class="danger-primary">Request Emergency Lockdown</button>
-      </form>
-    </div>
-
-    <div class="section-title">Change Owner Password</div>
-    <div class="maintenance-box">
-      <div style="font-size:13px;color:#AEB9D4;margin-bottom:14px;">Requires confirming via a link sent to ${escapeHtml(env.OWNER_EMAIL || 'your owner email')} before it actually takes effect — nothing changes until you click that link.</div>
-      ${passwordChangeStatus ? `<div class="email-status ${passwordChangeStatus.ok ? 'ok' : 'fail'}">${escapeHtml(passwordChangeStatus.text)}</div>` : ''}
-      <form method="POST">
-        <input type="hidden" name="owner_username" value="${escapeHtml(ownerUser)}">
-        <input type="hidden" name="owner_password" value="${escapeHtml(ownerPass)}">
-        <input type="hidden" name="action" value="request_password_change">
-        <input type="password" name="new_owner_password" placeholder="New password" required
-          style="width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-          padding:10px 12px;border-radius:6px;font-size:14px;margin-bottom:12px;">
-        <button type="submit" class="primary">Request Password Change</button>
-      </form>
-    </div>
-  </div>
-  <script>
-    (function(){
-      var ownerUsername = ${JSON.stringify(ownerUser)};
-      var ownerPassword = ${JSON.stringify(ownerPass)};
-      var guestRows = document.getElementById('guestRows');
-
-      function refresh(){
-        var active = document.activeElement;
-        if(active && guestRows.contains(active)){
-          return; // don't overwrite an in-progress email/username while you're typing it
-        }
-        fetch('/__admin_refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ owner_username: ownerUsername, owner_password: ownerPassword })
-        }).then(function(r){ return r.json(); }).then(function(data){
-          if(data.rowsHtml !== undefined){
-            guestRows.innerHTML = data.rowsHtml;
-          }
-        }).catch(function(){});
-      }
-      setInterval(refresh, 3000);
-    })();
-  </script>
-</body>
-</html>`;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function maintenancePage(message) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shaurya's Hub — Temporarily Closed</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;text-align:center;padding:20px;}
-  .card{max-width:400px;}
-  h1{color:#F5F1E8;font-size:24px;margin:0 0 14px 0;}
-  p{color:#AEB9D4;font-size:14px;line-height:1.6;margin:0;}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Sorry, this workspace is temporarily closed.</h1>
-    ${message ? `<p>${escapeHtml(message)}</p>` : ''}
-  </div>
-</body>
-</html>`;
-}
-
-function loginPage(error) {
-  return `<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en-GB">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shaurya's Hub — Sign In</title>
-<meta name="description" content="Shaurya's Hub — a personal workspace with study tools, games, an AI assistant, and live multiplayer, built by Shaurya Kshitij.">
-<meta property="og:title" content="Shaurya's Hub">
-<meta property="og:description" content="A personal workspace with study tools, games, an AI assistant, and live multiplayer.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://shauryashub.dev">
 <meta name="theme-color" content="#0E1B3D">
 <link rel="icon" href="/favicon.ico" sizes="any">
+<title>Shaurya's Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/docx@9/build/index.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/3.0.0/jspdf.umd.min.js"></script>
 <style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;}
-  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:280px;}
-  h1{color:#F5F1E8;font-size:20px;margin:0 0 18px 0;text-align:center;}
-  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:14px;}
-  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
-  .request-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
-  .request-link:hover{color:#E0AC3F;}
-</style>
-</head>
-<body>
-  <form class="card" method="POST">
-    <h1>Shaurya's Hub</h1>
-    ${error ? `<div class="error">${error}</div>` : ''}
-    <input type="text" name="username" placeholder="Username" autofocus required>
-    <input type="password" name="password" placeholder="Password" required>
-    <button type="submit">Enter</button>
-    <a class="request-link" href="/signup">Don't have access? Request it</a>
-  </form>
-</body>
-</html>`;
-}
+  :root{
+    --ink:#0B1530;
+    --ink-deep:#070D22;
+    --panel:#16234F;
+    --panel-raised:#1D2C5C;
+    --line:#243466;
+    --brass:#E0AC3F;
+    --brass-dim:#a87f28;
+    --brass-soft:#F0CE85;
+    --signal:#6FE0A0;
+    --slate:#AEB9D4;
+    --slate-dim:#6C7BA3;
+    --accent-teal:#4FB8C4;
+    --accent-orange:#E0875C;
+    --accent-violet:#9B85D6;
+    --accent-blue:#5B8DEF;
+    --accent-red:#D9584F;
+    --accent-pink:#D6659B;
+  }
+  *{box-sizing:border-box;}
 
-function adminLoginPage(error) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guest Access — Owner Login</title>
-<style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#0E1B3D;font-family:sans-serif;}
-  .card{background:#16234F;border:1px solid #243466;border-radius:10px;padding:36px 32px;width:280px;}
-  h1{color:#F5F1E8;font-size:18px;margin:0 0 18px 0;text-align:center;}
-  input{width:100%;box-sizing:border-box;background:#0E1B3D;border:1px solid #243466;color:#F5F1E8;
-    padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:14px;}
-  button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
-    font-weight:600;cursor:pointer;font-size:14px;}
-  .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
+  /* ---- Scrollbar theming ---- */
+  html{scrollbar-color:var(--scroll-accent, var(--brass-dim)) var(--ink); scrollbar-width:thin;}
+  ::-webkit-scrollbar{width:11px;height:11px;}
+  ::-webkit-scrollbar-track{background:var(--ink);}
+  ::-webkit-scrollbar-thumb{
+    background:var(--scroll-accent, var(--brass-dim));border-radius:6px;
+    border:2px solid var(--ink);
+    transition:background .25s ease;
+  }
+  ::-webkit-scrollbar-thumb:hover{background:var(--brass);}
+  ::-webkit-scrollbar-corner{background:var(--ink);}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;background:var(--ink);color:var(--slate);
+    font-family:'IBM Plex Sans',sans-serif;min-height:100vh;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.035) 0px, rgba(224,172,63,0.035) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.03) 0px, rgba(224,172,63,0.03) 1px, transparent 1px, transparent 28px);
+  }
+  h1,h2,h3{font-family:'Bebas Neue',sans-serif;color:#F5F1E8;margin:0;letter-spacing:.03em;font-weight:400;}
+  a{color:inherit;}
+  ::selection{background:rgba(224,172,63,0.35);color:#F5F1E8;}
+
+  /* ---- Top nav ---- */
+  nav{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 44px;border-bottom:1px solid var(--line);
+    background:linear-gradient(90deg, var(--panel) 0%, var(--ink) 65%, #1e1809 100%);
+    position:sticky;top:0;z-index:10;
+    backdrop-filter:blur(6px);
+  }
+  .brand-name{
+    font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;
+    letter-spacing:.05em;
+  }
+
+  .nav-links{display:flex;gap:28px;align-items:center;}
+  .nav-pin-badge{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--brass-soft);
+    background:var(--panel);border:1px solid var(--line);border-radius:20px;
+    padding:6px 14px;white-space:nowrap;cursor:pointer;
+    transition:border-color .15s ease;
+  }
+  .nav-pin-badge:hover{border-color:var(--brass-dim);}
+
+  .nav-call-bar{
+    display:flex;align-items:center;gap:8px;
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--signal);
+    background:var(--panel);border:1px solid var(--signal);border-radius:20px;
+    padding:6px 8px 6px 14px;white-space:nowrap;
+  }
+  .nav-call-bar button{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:4px 10px;border-radius:12px;font-size:11px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;transition:border-color .15s ease, color .15s ease;
+  }
+  .nav-call-bar button:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+
+  /* ---- Global search ---- */
+  .nav-search-wrap{position:relative;flex:1;max-width:360px;margin:0 24px;}
+  .nav-search-input{
+    width:100%;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:8px 14px;border-radius:20px;font-size:13px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .nav-search-input::placeholder{color:var(--slate-dim);}
+  .nav-search-input:focus{outline:none;border-color:var(--brass);}
+  .nav-search-results{
+    display:none;position:absolute;top:calc(100% + 8px);left:0;right:0;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    max-height:360px;overflow-y:auto;z-index:20;
+    box-shadow:0 12px 28px rgba(0,0,0,0.4);
+  }
+  .search-result-item{
+    padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--line);
+    display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  }
+  .search-result-item:last-child{border-bottom:none;}
+  .search-result-item:hover{background:var(--panel-raised);}
+  .search-result-type{
+    font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:var(--brass-soft);
+    text-transform:uppercase;letter-spacing:.08em;border:1px solid rgba(224,172,63,0.3);
+    border-radius:4px;padding:1px 6px;flex-shrink:0;
+  }
+  .search-result-label{font-size:13.5px;color:#F5F1E8;}
+  .search-result-sub{font-size:11.5px;color:var(--slate-dim);width:100%;}
+  .search-result-empty{padding:14px;font-size:13px;color:var(--slate-dim);text-align:center;}
+  .nav-link{
+    position:relative;font-size:13px;color:var(--slate-dim);cursor:pointer;
+    letter-spacing:.04em;text-transform:uppercase;padding:4px 0;
+    transition:color .25s cubic-bezier(0.16,1,0.3,1);
+  }
+  .nav-link::after{
+    content:'';position:absolute;left:0;right:0;bottom:-2px;height:1.5px;
+    background:var(--brass);transform:scaleX(0);transform-origin:left;
+    transition:transform .3s cubic-bezier(0.16,1,0.3,1);
+  }
+  .nav-link.active{color:#F5F1E8;}
+  .nav-link.active::after{transform:scaleX(1);}
+  .nav-link:hover:not(.active){color:var(--slate);}
+
+  /* ---- Views ---- */
+  .view{
+    display:none;
+    opacity:0;
+    transform:translateY(14px) scale(0.985);
+    transition:opacity .42s cubic-bezier(0.16,1,0.3,1), transform .42s cubic-bezier(0.16,1,0.3,1);
+  }
+  .view.visible{display:block;}
+  .view.visible.active{opacity:1;transform:translateY(0) scale(1);}
+  @media (prefers-reduced-motion: reduce){
+    .view{transition:none;}
+  }
+
+  /* ---- Hub background atmosphere (Home, Study, Entertainment, Game, Utilities hubs only) ---- */
+  #view-home, #view-study, #view-entertainment, #view-games, #view-utilities, #view-challenges, #view-multiplayer{
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.028) 0px, rgba(224,172,63,0.028) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.022) 0px, rgba(224,172,63,0.022) 1px, transparent 1px, transparent 28px),
+      radial-gradient(ellipse 800px 400px at 85% 0%, rgba(224,172,63,0.05), transparent 60%);
+    min-height:100vh;
+  }
+
+  /* ---- Per-hub accent colors (trial) ---- */
+  #view-study h2{color:var(--accent-orange);}
+  #view-study .cursor{background:var(--accent-orange);}
+  #view-study .hub-icon svg{stroke:var(--accent-orange);}
+  #view-study .hub-card:hover{border-color:var(--accent-orange);box-shadow:0 10px 24px rgba(224,135,92,0.22);}
+
+  #view-entertainment h2{color:var(--accent-violet);}
+  #view-entertainment .cursor{background:var(--accent-violet);}
+  #view-entertainment .hub-icon svg{stroke:var(--accent-violet);}
+  #view-entertainment .hub-card:hover{border-color:var(--accent-violet);box-shadow:0 10px 24px rgba(155,133,214,0.22);}
+
+  #view-games h2{color:var(--accent-teal);}
+  #view-games .cursor{background:var(--accent-teal);}
+  #view-games .hub-icon svg{stroke:var(--accent-teal);}
+  #view-games .hub-card:hover{border-color:var(--accent-teal);box-shadow:0 10px 24px rgba(79,184,196,0.22);}
+
+  #view-utilities h2{color:var(--accent-blue);}
+  #view-utilities .cursor{background:var(--accent-blue);}
+  #view-utilities .hub-icon svg{stroke:var(--accent-blue);}
+  #view-utilities .hub-card:hover{border-color:var(--accent-blue);box-shadow:0 10px 24px rgba(91,141,239,0.22);}
+
+  #view-challenges h2{color:var(--accent-red);}
+  #view-challenges .cursor{background:var(--accent-red);}
+  #view-challenges .hub-icon svg{stroke:var(--accent-red);}
+  #view-challenges .hub-card:hover{border-color:var(--accent-red);box-shadow:0 10px 24px rgba(217,88,79,0.22);}
+
+  #view-multiplayer h2{color:var(--accent-pink);}
+  #view-multiplayer .cursor{background:var(--accent-pink);}
+  #view-multiplayer .hub-icon svg{stroke:var(--accent-pink);}
+  #view-multiplayer .hub-card:hover{border-color:var(--accent-pink);box-shadow:0 10px 24px rgba(214,101,155,0.22);}
+
+  /* ---- Hero ---- */
+  .hero{
+    position:relative;overflow:hidden;
+    padding:120px 44px 130px 44px;
+    background:
+      radial-gradient(ellipse 900px 520px at 12% 0%, rgba(224,172,63,0.20), transparent 62%),
+      linear-gradient(135deg, var(--ink-deep) 0%, #142352 32%, #26305e 58%, #55482c 82%, #a87f28 100%);
+    background-size:130% 130%;
+    animation:heroDrift 22s ease-in-out infinite alternate;
+    text-align:left;
+  }
+  @keyframes heroDrift{
+    0%{background-position:0% 0%, 0% 0%;}
+    100%{background-position:6% 4%, 6% 4%;}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .hero{animation:none;}
+  }
+
+  .hero::after{
+    content:'';position:absolute;inset:0;pointer-events:none;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(224,172,63,0.055) 0px, rgba(224,172,63,0.055) 1px, transparent 1px, transparent 32px),
+      repeating-linear-gradient(90deg, rgba(224,172,63,0.045) 0px, rgba(224,172,63,0.045) 1px, transparent 1px, transparent 32px);
+    mask-image:linear-gradient(180deg, black, transparent 88%);
+  }
+
+  .matrix-canvas{
+    position:absolute;inset:0;width:100%;height:100%;
+    opacity:0.16;pointer-events:none;
+    mask-image:linear-gradient(180deg, black, transparent 85%);
+    -webkit-mask-image:linear-gradient(180deg, black, transparent 85%);
+  }
+  @media (prefers-reduced-motion: reduce){
+    .matrix-canvas{display:none;}
+  }
+
+  .hero-inner{max-width:660px;position:relative;z-index:1;}
+  .hero-eyebrow{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--brass-soft);
+    letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px;
+    display:flex;align-items:center;gap:10px;
+  }
+  .hero-eyebrow .rule{width:26px;height:1px;background:var(--brass-dim);}
+
+  .hero h1{
+    font-size:64px;line-height:1.03;margin-bottom:16px;
+    background:linear-gradient(90deg, #F5F1E8 0%, #F5F1E8 58%, var(--brass-soft) 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .cursor{
+    display:inline-block;width:8px;height:44px;background:var(--brass-soft);
+    margin-left:6px;vertical-align:-6px;
+    animation:blink 1.1s steps(1) infinite;
+  }
+  .cursor.small{width:6px;height:24px;vertical-align:-4px;margin-left:5px;}
+  .cursor.cursor-paused{animation:none;opacity:1;}
+
+  .count-pop{
+    display:inline-block;
+    animation:countPop 0.35s ease;
+  }
+  @keyframes countPop{
+    0%{transform:scale(1);}
+    30%{transform:scale(1.3);color:var(--brass-soft);}
+    100%{transform:scale(1);}
+  }
+  @media (prefers-reduced-motion: reduce){.count-pop{animation:none;}}
+  @keyframes blink{0%,49%{opacity:1;}50%,100%{opacity:0;}}
+  @media (prefers-reduced-motion: reduce){.cursor{animation:none;opacity:1;}}
+
+  .hero .sub{font-size:15.5px;color:var(--slate);line-height:1.65;max-width:460px;margin-bottom:30px;}
+
+  .status-line{
+    display:inline-flex;align-items:center;gap:10px;
+    font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--slate);
+    padding:9px 16px;border:1px solid rgba(224,172,63,0.3);border-radius:20px;
+    background:rgba(11,21,48,0.4);
+  }
+  .status-dot{
+    width:7px;height:7px;border-radius:50%;background:var(--signal);
+    box-shadow:0 0 0 3px rgba(111,224,160,0.18);
+    animation:pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  @media (prefers-reduced-motion: reduce){.status-dot{animation:none;}}
+
+  .call-choice-overlay{
+    position:fixed;inset:0;background:rgba(11,21,48,0.75);z-index:200;
+    display:flex;align-items:center;justify-content:center;padding:20px;
+  }
+  .call-choice-box{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:28px;max-width:340px;width:100%;text-align:center;
+  }
+  .call-choice-title{font-family:'Bebas Neue',sans-serif;font-size:24px;color:#F5F1E8;letter-spacing:.03em;}
+  .call-choice-sub{font-size:13px;color:var(--slate-dim);margin:6px 0 20px;}
+  .call-choice-buttons{display:flex;gap:12px;}
+  .call-choice-btn{
+    flex:1;background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;
+    padding:18px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:8px;
+    color:#F5F1E8;font-size:13px;font-weight:600;transition:border-color .15s ease,background .15s ease;
+  }
+  .call-choice-btn:hover{border-color:var(--brass);background:rgba(224,172,63,0.1);}
+  .call-choice-icon{font-size:28px;}
+  .call-choice-cancel{
+    margin-top:16px;background:none;border:none;color:var(--slate-dim);font-size:12.5px;
+    cursor:pointer;text-decoration:underline;
+  }
+
+  .call-reaction-float{
+    position:absolute;bottom:50px;font-size:32px;animation:reactionFloat 2.2s ease-out forwards;
+  }
+  @keyframes reactionFloat{
+    0%{transform:translateY(0) scale(0.8);opacity:0;}
+    15%{transform:translateY(-20px) scale(1.1);opacity:1;}
+    100%{transform:translateY(-160px) scale(1);opacity:0;}
+  }
+
+  /* ---- Widgets ---- */
+  .widget-row{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap;}
+  .widget{
+    background:rgba(11,21,48,0.45);border:1px solid rgba(224,172,63,0.22);
+    border-radius:10px;padding:16px 20px;min-width:190px;
+    backdrop-filter:blur(6px);
+  }
+  .widget-label{
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;
+  }
+  .widget-main{font-family:'Bebas Neue',sans-serif;font-size:28px;color:#F5F1E8;letter-spacing:.02em;line-height:1;}
+  .widget-sub{font-size:12px;color:var(--slate-dim);margin-top:6px;font-family:'IBM Plex Mono',monospace;}
+
+  .fact-card{
+    margin-top:16px;max-width:520px;
+    background:rgba(11,21,48,0.4);border:1px solid rgba(224,172,63,0.18);
+    border-radius:10px;padding:14px 18px;
+    backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,0.22);
+  }
+  .fact-label{
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px;
+  }
+  .fact-text-wrap{position:relative;min-height:56px;}
+  .fact-text{
+    position:absolute;top:0;left:0;right:0;
+    font-size:13px;color:var(--slate);line-height:1.55;
+    opacity:0;transition:opacity .6s ease;
+  }
+  .fact-text.shown{opacity:1;}
+
+  /* ---- Body ---- */
+  main{padding:56px 44px;max-width:1100px;margin:0 auto;min-height:60vh;}
+
+  /* ---- AI Assistant conversation sidebar ---- */
+  main.chat-with-sidebar{display:flex;gap:24px;align-items:flex-start;}
+  .chat-sidebar{
+    width:220px;flex-shrink:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:14px;max-height:640px;overflow-y:auto;
+    display:flex;flex-direction:column;
+  }
+  .chat-sidebar-new-row{display:flex;gap:6px;margin-bottom:14px;}
+  .new-chat-btn{
+    flex:1;background:var(--brass);color:var(--ink);border:none;
+    padding:10px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
+    transition:background .2s cubic-bezier(0.16,1,0.3,1);
+  }
+  .new-chat-btn:hover{background:var(--brass-soft);}
+  .new-project-btn{
+    background:var(--panel-raised);color:var(--slate);border:1px solid var(--line);
+    padding:10px 12px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .new-project-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+
+  .chat-conv-item{
+    padding:9px 10px;border-radius:6px;margin-bottom:2px;cursor:pointer;
+    font-size:12.5px;color:var(--slate);border:1px solid transparent;
+    display:flex;align-items:center;justify-content:space-between;gap:6px;
+    transition:background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
+  .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-conv-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;}
+
+  .chat-conv-overflow-wrapper{position:relative;flex-shrink:0;}
+  .chat-conv-overflow-btn{
+    display:none;background:none;border:none;color:var(--slate);cursor:pointer;
+    font-size:14px;padding:2px 5px;opacity:0.75;border-radius:4px;
+    transition:opacity .15s ease, background .15s ease;
+  }
+  .chat-conv-item:hover .chat-conv-overflow-btn{display:block;}
+  .chat-conv-overflow-btn:hover{opacity:1;background:rgba(255,255,255,0.08);}
+  .chat-conv-overflow-menu{
+    display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:20;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    min-width:150px;padding:6px;flex-direction:column;gap:2px;
+  }
+  .chat-conv-overflow-menu.visible{display:flex;}
+  .chat-conv-overflow-menu button{
+    background:none;border:none;color:var(--slate);text-align:left;padding:8px 10px;
+    border-radius:5px;font-size:12.5px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-conv-overflow-menu button:hover{background:var(--panel-raised);color:#F5F1E8;}
+
+  .chat-project-group{margin-bottom:4px;}
+  .chat-project-header{
+    display:flex;align-items:center;justify-content:space-between;gap:6px;
+    padding:8px 6px;cursor:pointer;color:var(--slate-dim);font-size:11px;
+    text-transform:uppercase;letter-spacing:.05em;font-weight:600;
+  }
+  .chat-project-header:hover{color:#F5F1E8;}
+  .chat-project-header-left{display:flex;align-items:center;gap:6px;overflow:hidden;}
+  .chat-project-header-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .chat-project-caret{transition:transform .15s ease;flex-shrink:0;}
+  .chat-project-group.collapsed .chat-project-caret{transform:rotate(-90deg);}
+  .chat-project-group.collapsed .chat-project-items{display:none;}
+  .chat-project-items{padding-left:4px;}
+
+  .chat-search-input{
+    width:100%;box-sizing:border-box;background:var(--ink);border:1px solid var(--line);
+    color:#F5F1E8;padding:8px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;
+  }
+  .chat-search-input:focus{outline:none;border-color:var(--brass-dim);}
+  .chat-sidebar-empty{color:#6C7BA3;font-size:12px;padding:8px 4px;}
+  .chat-conv-list{margin-bottom:4px;}
+  .chat-memory-toggle{
+    margin-top:14px;padding-top:14px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--slate-dim);cursor:pointer;text-align:center;
+    transition:color .15s ease;
+  }
+  .chat-memory-toggle:hover{color:var(--brass-soft);}
+  .chat-memory-viewer{
+    display:none;margin-top:10px;padding:10px;background:var(--ink);border:1px solid var(--line);
+    border-radius:6px;font-size:11.5px;color:var(--slate);line-height:1.6;
+  }
+  .chat-memory-viewer.visible{display:block;}
+  .chat-memory-text{white-space:pre-wrap;margin-bottom:10px;}
+  .chat-memory-forget-btn{
+    width:100%;background:none;border:1px solid var(--accent-red);color:var(--accent-red);
+    padding:6px;border-radius:6px;font-size:11px;cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-memory-forget-btn:hover{background:var(--accent-red);color:#F5F1E8;}
+
+  .chat-sidebar-profile{
+    display:flex;align-items:center;gap:10px;margin-top:auto;padding-top:14px;
+    border-top:1px solid var(--line);
+  }
+  .chat-sidebar-avatar{
+    width:28px;height:28px;border-radius:50%;flex-shrink:0;
+    background:var(--brass);color:var(--ink);font-weight:700;font-size:13px;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .chat-sidebar-name{font-size:12.5px;color:var(--slate);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+  .move-to-project-list{display:flex;flex-direction:column;gap:6px;margin-bottom:16px;max-height:220px;overflow-y:auto;}
+  .move-to-project-option{
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:6px;
+    padding:10px 12px;text-align:left;cursor:pointer;color:#F5F1E8;font-size:13px;
+    transition:border-color .15s ease;
+  }
+  .move-to-project-option:hover{border-color:var(--brass-dim);}
+  .move-to-project-option.current{border-color:var(--brass);background:rgba(224,172,63,0.1);}
+
+  .chat-main-area{flex:1;min-width:0;}
+  .view-head{margin-bottom:22px;}
+  .view-head h2{font-size:34px;margin-bottom:8px;}
+  .view-head .view-sub{font-size:13.5px;color:var(--slate-dim);}
+  .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;}
+  .clear-btn{
+    flex-shrink:0;background:var(--panel);border:1px solid var(--line);color:var(--slate);
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.03em;
+    padding:8px 14px;border-radius:6px;cursor:pointer;margin-top:4px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .clear-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .clear-btn.active{border-color:var(--brass);color:#F5F1E8;background:rgba(224,172,63,0.12);}
+  .chat-head-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+
+  .chat-overflow-wrapper{position:relative;}
+  .chat-overflow-btn{
+    background:var(--panel);border:1px solid var(--line);color:var(--slate);
+    width:34px;height:34px;border-radius:6px;font-size:16px;cursor:pointer;margin-top:4px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .chat-overflow-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-overflow-menu{
+    display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:20;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    min-width:150px;padding:6px;flex-direction:column;gap:2px;
+  }
+  .chat-overflow-menu.visible{display:flex;}
+  .chat-overflow-menu button{
+    background:none;border:none;color:var(--slate);text-align:left;padding:8px 10px;
+    border-radius:5px;font-size:13px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-overflow-menu button:hover{background:var(--panel-raised);color:#F5F1E8;}
+
+  .placeholder-note{
+    font-size:13px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;
+    border:1px dashed var(--line);border-radius:8px;padding:20px;text-align:center;
+    letter-spacing:.02em;
+  }
+
+  .hub-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:14px;}
+  .hub-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:20px;cursor:pointer;
+    transition:border-color .3s cubic-bezier(0.16,1,0.3,1), transform .3s cubic-bezier(0.16,1,0.3,1), box-shadow .3s cubic-bezier(0.16,1,0.3,1);
+    height:150px;display:flex;flex-direction:column;justify-content:flex-start;
+    opacity:0;position:relative;overflow:hidden;
+    animation:hubCardIn 0.45s ease forwards;
+  }
+  .hub-card::before{
+    content:'';position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(circle 180px at var(--mx,50%) var(--my,50%), rgba(224,172,63,0.14), transparent 70%);
+    opacity:0;transition:opacity .4s ease;
+  }
+  .hub-card:hover::before{opacity:1;}
+  .hub-card:nth-child(1){animation-delay:0.08s;}
+  .hub-card:nth-child(2){animation-delay:0.22s;}
+  .hub-card:nth-child(3){animation-delay:0.36s;}
+  .hub-card:nth-child(4){animation-delay:0.50s;}
+  .hub-card:nth-child(5){animation-delay:0.64s;}
+  .hub-card:nth-child(6){animation-delay:0.78s;}
+  .hub-card:nth-child(7){animation-delay:0.92s;}
+  .hub-card:nth-child(8){animation-delay:1.06s;}
+  .hub-card:nth-child(9){animation-delay:1.20s;}
+  @keyframes hubCardIn{
+    from{opacity:0;transform:translateY(14px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .hub-card{animation:none;opacity:1;}
+    .hub-card::before{display:none;}
+  }
+  .hub-card:hover{border-color:var(--brass-dim);transform:translateY(-3px);box-shadow:0 12px 28px rgba(0,0,0,0.3);}
+  .hub-card-title{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.03em;margin-bottom:6px;}
+  .hub-card-desc{font-size:12.5px;color:var(--slate-dim);line-height:1.5;}
+  .hub-icon{margin-bottom:10px;}
+  .e2ee-badge{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.02em;
+    background:rgba(111,224,160,0.12);color:#6FE0A0;border:1px solid rgba(111,224,160,0.35);
+    padding:2px 8px;border-radius:20px;vertical-align:middle;margin-left:6px;
+  }
+  .hub-icon svg{
+    width:22px;height:22px;fill:none;stroke:var(--brass-soft);
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;
+  }
+
+  /* ---- Chat ---- */
+  #chatlog{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    height:440px;overflow-y:auto;padding:20px;margin-bottom:14px;
+  }
+  .msg{margin-bottom:16px;font-size:14px;line-height:1.6;}
+  .msg .who{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--slate-dim);margin-bottom:4px;font-family:'IBM Plex Mono',monospace;}
+  .msg.user .who{color:var(--brass);}
+  .msg.assistant .who{color:var(--signal);}
+  .msg .body{color:#F5F1E8;white-space:pre-wrap;}
+  .chat-input-row{display:flex;gap:8px;}
+  .chat-input-row textarea{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:12px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+    resize:none;height:46px;
+  }
+  .chat-input-row textarea:focus{outline:none;border-color:var(--brass);}
+  .chat-input-row button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 22px;
+    border-radius:6px;font-weight:600;cursor:pointer;
+  }
+  .chat-input-row button:disabled{opacity:0.5;cursor:default;}
+  .chat-input-row .attach-btn{
+    background:var(--panel-raised);color:var(--slate);padding:0 14px;font-size:18px;
+    border:1px solid var(--line);transition:border-color .15s ease, color .15s ease;
+  }
+  .chat-input-row .attach-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+
+  .chat-input-wrapper{
+    display:flex;align-items:flex-end;gap:6px;
+    background:var(--panel);border:1px solid var(--line);border-radius:26px;
+    padding:10px 10px 10px 18px;transition:border-color .15s ease;
+  }
+  .chat-input-wrapper:focus-within{border-color:var(--brass-dim);}
+  .chat-input-inline{
+    flex:1;background:none;border:none;color:#F5F1E8;font-size:15px;
+    font-family:'IBM Plex Sans',sans-serif;resize:none;min-height:28px;max-height:200px;
+    padding:8px 0;line-height:1.5;overflow-y:auto;
+  }
+  .chat-input-inline:focus{outline:none;}
+  .attach-btn-inline{
+    background:none;border:none;color:var(--slate);font-size:22px;cursor:pointer;
+    width:34px;height:34px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+    border-radius:50%;transition:background .15s ease, color .15s ease;
+  }
+  .attach-btn-inline:hover{background:var(--panel-raised);color:#F5F1E8;}
+
+  .mode-selector-wrapper{position:relative;flex-shrink:0;}
+  .mode-selector-btn{
+    display:flex;align-items:center;gap:5px;background:var(--panel-raised);
+    border:1px solid var(--line);color:var(--slate);padding:7px 10px;
+    border-radius:20px;font-size:11.5px;cursor:pointer;white-space:nowrap;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .mode-selector-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .mode-selector-caret{font-size:9px;opacity:0.7;}
+  .mode-selector-menu{
+    display:none;position:absolute;left:0;bottom:calc(100% + 8px);z-index:20;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    min-width:220px;padding:6px;flex-direction:column;gap:2px;
+  }
+  .mode-selector-menu.visible{display:flex;}
+  .mode-selector-menu button{
+    display:flex;flex-direction:column;align-items:flex-start;gap:2px;
+    background:none;border:none;color:var(--slate);text-align:left;padding:9px 10px;
+    border-radius:6px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+    transition:background .15s ease, color .15s ease;
+  }
+  .mode-selector-menu button:hover{background:var(--panel-raised);color:#F5F1E8;}
+  .mode-selector-menu button.current{background:rgba(224,172,63,0.1);}
+  .mode-selector-menu button.current .mode-selector-option-title{color:var(--brass);}
+  .mode-selector-option-title{font-size:13px;font-weight:600;}
+  .mode-selector-option-desc{font-size:11px;color:var(--slate-dim);}
+
+  .send-btn-inline{
+    background:var(--brass);color:var(--ink);border:none;width:38px;height:38px;flex-shrink:0;
+    border-radius:50%;cursor:pointer;font-size:18px;font-weight:700;
+    display:flex;align-items:center;justify-content:center;
+    transition:background .15s ease;
+  }
+  .send-btn-inline:hover{background:var(--brass-soft);}
+  .send-btn-inline:disabled{opacity:0.5;cursor:default;}
+  .chat-image-preview{display:none;margin-bottom:8px;}
+  .chat-image-preview.visible{display:flex;align-items:center;gap:10px;}
+  .chat-image-preview img{
+    height:56px;width:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line);
+  }
+  .chat-image-preview-remove{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .chat-image-preview-remove:hover{border-color:var(--accent-red);color:var(--accent-red);}
+  .msg-image{max-width:220px;border-radius:8px;display:block;margin-top:8px;border:1px solid var(--line);}
+  .msg-image-marker{color:var(--slate-dim);font-size:11.5px;font-style:italic;margin-top:6px;}
+  .doc-card{
+    display:flex;align-items:center;gap:12px;margin-top:10px;padding:12px 14px;
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;max-width:320px;
+  }
+  .doc-card-icon{font-size:26px;flex-shrink:0;}
+  .doc-card-info{flex:1;min-width:0;}
+  .doc-card-title{font-size:13.5px;color:#F5F1E8;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .doc-card-type{font-size:11px;color:var(--slate-dim);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;}
+  .doc-card-btn{
+    flex-shrink:0;background:var(--brass);color:var(--ink);border:none;padding:7px 14px;
+    border-radius:6px;font-weight:600;font-size:12px;cursor:pointer;transition:background .15s ease;
+  }
+  .doc-card-btn:hover{background:var(--brass-soft);}
+
+  .dm-layout{display:flex;gap:20px;flex-wrap:wrap;}
+  .dm-sidebar{flex:0 0 200px;min-width:180px;}
+  .dm-main{flex:1;min-width:280px;}
+  .dm-conversation-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+  .e2ee-badge-inline{font-size:16px;cursor:default;margin-left:6px;opacity:0.85;vertical-align:middle;}
+  .call-status-panel{display:flex;flex-direction:column;}
+
+  .call-panel-inner{
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;
+    padding:14px;display:flex;justify-content:space-between;align-items:center;
+    flex-wrap:wrap;gap:10px;margin-bottom:14px;
+  }
+  #incomingCallBanner.call-panel-inner{border-left:3px solid var(--accent-pink);}
+  #activeCallBar.call-panel-inner{border-left:3px solid var(--signal);}
+  .video-call-panel{position:relative;background:#000;border-radius:8px;margin-bottom:14px;overflow:hidden;}
+
+  .dm-log{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;
+  }
+  .dm-typing-indicator{font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;}
+
+  .fullscreen-toggle-btn{
+    position:absolute;top:10px;right:10px;z-index:5;
+    background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.3);color:#fff;
+    width:32px;height:32px;border-radius:6px;font-size:16px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    transition:background .15s ease;
+  }
+  .fullscreen-toggle-btn:hover{background:rgba(0,0,0,0.8);}
+
+  .fullscreen-only-controls{
+    display:none;position:absolute;bottom:14px;left:50%;transform:translateX(-50%);gap:8px;
+  }
+  #videoCallArea:fullscreen,
+  #videoCallArea:-webkit-full-screen{
+    display:flex !important;align-items:center;justify-content:center;
+    background:#000;border-radius:0;
+  }
+  #videoCallArea:fullscreen #remoteCallVideo,
+  #videoCallArea:-webkit-full-screen #remoteCallVideo{
+    max-height:100vh;height:100vh;width:100%;object-fit:contain;
+  }
+  #videoCallArea:fullscreen .fullscreen-only-controls,
+  #videoCallArea:-webkit-full-screen .fullscreen-only-controls{
+    display:flex;
+  }
+  #videoCallArea:fullscreen #localCallVideo,
+  #videoCallArea:-webkit-full-screen #localCallVideo{
+    width:180px;bottom:20px;right:20px;
+  }
+  .typing{color:var(--slate-dim);font-size:13px;font-style:italic;display:flex;align-items:center;gap:6px;}
+  .typing-dots{display:inline-flex;gap:3px;}
+  .typing-dots span{
+    width:5px;height:5px;border-radius:50%;background:var(--slate-dim);display:inline-block;
+    animation:typingBounce 1.2s infinite ease-in-out;
+  }
+  .typing-dots span:nth-child(1){animation-delay:0s;}
+  .typing-dots span:nth-child(2){animation-delay:0.15s;}
+  .typing-dots span:nth-child(3){animation-delay:0.3s;}
+  @keyframes typingBounce{
+    0%,60%,100%{transform:translateY(0);opacity:0.4;}
+    30%{transform:translateY(-4px);opacity:1;}
+  }
+
+  .msg.msg-in{animation:msgIn 0.35s ease;}
+  .msg-actions{margin-top:6px;}
+  .msg-action-btn{
+    background:none;border:none;color:var(--slate-dim);font-size:11px;cursor:pointer;
+    padding:2px 0;text-decoration:underline;transition:color .15s ease;
+  }
+  .msg-action-btn:hover{color:var(--brass-soft);}
+  .msg-edit-input{
+    width:100%;box-sizing:border-box;background:var(--ink);border:1px solid var(--line);
+    color:#F5F1E8;padding:8px 10px;border-radius:6px;font-size:13px;font-family:inherit;
+    resize:vertical;min-height:60px;margin-bottom:8px;
+  }
+  .msg-edit-actions{display:flex;gap:8px;}
+  .msg-edit-actions button{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;transition:border-color .15s ease, color .15s ease;
+  }
+  .msg-edit-actions button:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .msg-edit-actions button:first-child{background:var(--brass);color:var(--ink);border-color:var(--brass);font-weight:600;}
+  .msg-edit-actions button:first-child:hover{background:var(--brass-soft);}
+  @keyframes msgIn{
+    from{opacity:0;transform:translateY(8px);}
+    to{opacity:1;transform:translateY(0);}
+  }
+  @keyframes toastIn{
+    from{opacity:0;transform:translateX(20px);}
+    to{opacity:1;transform:translateX(0);}
+  }
+  @media (prefers-reduced-motion: reduce){
+    .msg.msg-in{animation:none;}
+    .typing-dots span{animation:none;opacity:1;}
+    .dm-toast{animation:none;}
+  }
+
+  /* ---- Shared skeleton loading shimmer ---- */
+  .skeleton{
+    display:block;border-radius:4px;height:14px;
+    background:linear-gradient(90deg, var(--panel-raised) 25%, rgba(242,238,228,0.08) 37%, var(--panel-raised) 63%);
+    background-size:400% 100%;
+    animation:skeletonShimmer 1.4s ease infinite;
+  }
+  @keyframes skeletonShimmer{
+    0%{background-position:100% 0;}
+    100%{background-position:0 0;}
+  }
+  @media (prefers-reduced-motion: reduce){.skeleton{animation:none;}}
+
+  /* ---- Focus Timer ---- */
+  .timer-main{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:calc(100vh - 180px);text-align:center;
+  }
+  .timer-ring-wrap{
+    position:relative;width:min(64vw, 380px);height:min(64vw, 380px);
+    margin-bottom:34px;
+  }
+  .timer-ring{width:100%;height:100%;transform:rotate(-90deg);}
+  .ring-track{fill:none;stroke:var(--panel-raised);stroke-width:10;}
+  .ring-progress{
+    fill:none;stroke:var(--brass);stroke-width:10;stroke-linecap:round;
+    transition:stroke-dashoffset 1s linear, stroke .3s ease;
+  }
+  .ring-progress.break{stroke:var(--signal);}
+  .timer-center{
+    position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+  }
+  .timer-phase{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--brass-soft);margin-bottom:10px;
+  }
+  .timer-phase.break{color:var(--signal);}
+  .timer-display{
+    font-family:'Bebas Neue',sans-serif;font-size:clamp(48px, 9vw, 76px);color:#F5F1E8;letter-spacing:.04em;
+    line-height:1;
+  }
+  .timer-controls{display:flex;gap:10px;justify-content:center;margin-bottom:24px;}
+  .timer-btn{
+    background:var(--panel-raised);border:1px solid var(--line);color:var(--slate);
+    padding:10px 20px;border-radius:6px;cursor:pointer;font-size:13px;letter-spacing:.02em;
+    transition:border-color .25s cubic-bezier(0.16,1,0.3,1), color .25s cubic-bezier(0.16,1,0.3,1), transform .25s cubic-bezier(0.16,1,0.3,1), background .25s cubic-bezier(0.16,1,0.3,1);
+  }
+  .timer-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;transform:translateY(-1px);}
+  .timer-btn.primary{background:var(--brass);border-color:var(--brass);color:var(--ink);font-weight:600;}
+  .timer-btn.primary:hover{background:var(--brass-soft);}
+  .timer-sessions{font-size:12.5px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;}
+
+  /* ---- Riddles & Jokes ---- */
+  .riddle-buttons{display:flex;gap:10px;flex-shrink:0;margin-top:4px;}
+  .riddle-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:32px 34px;max-width:600px;
+    box-shadow:0 8px 22px rgba(0,0,0,0.24);
+  }
+  .riddle-label{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--brass-soft);
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;min-height:14px;
+  }
+  .riddle-text{font-size:17px;color:#F5F1E8;line-height:1.6;margin-bottom:20px;}
+  .punchline{display:block;margin-top:10px;opacity:0;transition:opacity .6s ease;color:var(--brass-soft);}
+  .punchline.shown{opacity:1;}
+  .riddle-answer-row{display:flex;gap:8px;margin-bottom:14px;}
+
+  /* ---- Quick add (shared input+button row) ---- */
+  .quick-add{display:flex;gap:8px;margin-bottom:18px;}
+  .quick-add input{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .quick-add input:focus{outline:none;border-color:var(--brass);}
+  .quick-add button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 18px;
+    border-radius:6px;font-weight:600;cursor:pointer;font-size:14px;
+  }
+  .quick-add button:hover{background:var(--brass-soft);}
+
+  /* ---- Countdown date row (explicit day/month/year, no native date picker) ---- */
+  .countdown-date-row{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;}
+  .countdown-date-row select, .countdown-date-row input{
+    background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 12px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .countdown-date-row select:focus, .countdown-date-row input:focus{outline:none;border-color:var(--brass);}
+  .countdown-date-row select#countdownDay{width:76px;flex-shrink:0;}
+  .countdown-date-row select#countdownMonth{flex:1;min-width:120px;}
+  .countdown-date-row input#countdownYear{width:100px;flex-shrink:0;}
+  .countdown-date-row select#capsuleDay{width:76px;flex-shrink:0;}
+  .countdown-date-row select#capsuleMonth{flex:1;min-width:120px;}
+  .countdown-date-row input#capsuleYear{width:100px;flex-shrink:0;}
+  .countdown-date-row button{
+    background:var(--brass);color:var(--ink);border:none;padding:0 18px;
+    border-radius:6px;font-weight:600;cursor:pointer;font-size:14px;flex-shrink:0;
+  }
+  .countdown-date-row button:hover{background:var(--brass-soft);}
+
+  /* ---- Small stat boxes (used by Reaction Test) ---- */
+  .clicker-stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
+  .cs-label{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--brass-soft);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;}
+  .cs-value{font-family:'Bebas Neue',sans-serif;font-size:24px;color:#F5F1E8;letter-spacing:.02em;}
+
+  /* ---- Decision Wheel ---- */
+  .wheel-stage{position:relative;display:flex;justify-content:center;align-items:center;margin:30px 0;}
+  .wheel-pointer{
+    position:absolute;top:-6px;left:50%;transform:translateX(-50%);z-index:2;
+    width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;
+    border-top:22px solid var(--brass-soft);
+  }
+  .wheel-wrap{width:280px;height:280px;border-radius:50%;box-shadow:0 8px 30px rgba(0,0,0,0.4);}
+  .wheel{
+    width:100%;height:100%;border-radius:50%;position:relative;
+    transition:transform 4s cubic-bezier(0.15, 0.8, 0.1, 1);
+    border:4px solid var(--panel);
+  }
+  .wheel-label{
+    position:absolute;top:50%;left:50%;transform-origin:0 0;
+    font-family:'IBM Plex Mono',monospace;font-size:11px;color:#1a1a1a;font-weight:600;
+    white-space:nowrap;
+  }
+
+  /* ---- Simple list rows (used by Decision Wheel options) ---- */
+  .task-list{list-style:none;padding:0;margin:0 0 16px 0;}
+  .task-item{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 4px;border-bottom:1px solid var(--line);font-size:14px;
+  }
+  .task-item:last-child{border-bottom:none;}
+  .task-text{color:#F5F1E8;}
+  .task-del{color:var(--slate-dim);cursor:pointer;font-size:16px;padding:2px 8px;flex-shrink:0;}
+  .task-del:hover{color:var(--danger, #C1604A);}
+
+  /* ---- Simple button grid (used by Which X quiz options) ---- */
+  .upgrade-grid{display:grid;grid-template-columns:1fr;gap:8px;margin-top:14px;}
+
+  /* ---- Quick Calculator ---- */
+  .calc-display{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:24px 20px;text-align:right;font-family:'Bebas Neue',sans-serif;
+    font-size:40px;color:#F5F1E8;margin-bottom:14px;max-width:340px;
+    overflow-x:auto;white-space:nowrap;
+  }
+  .calc-grid{display:grid;grid-template-columns:repeat(4, 76px);gap:8px;max-width:340px;}
+  .calc-btn{
+    background:var(--panel-raised);border:1px solid var(--line);color:#F5F1E8;
+    border-radius:8px;padding:16px 0;font-size:18px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;transition:border-color .1s ease;
+  }
+  .calc-btn:hover{border-color:var(--brass-dim);}
+  .calc-btn.op{color:var(--brass-soft);}
+  .calc-btn.equals{background:var(--brass);color:var(--ink);font-weight:600;}
+  .calc-btn.equals:hover{background:var(--brass-soft);}
+  .calc-btn.wide{grid-column:span 2;}
+
+  /* ---- Unit Converter ---- */
+  .convert-row{display:flex;gap:10px;max-width:400px;margin-bottom:10px;}
+  .convert-row select, .convert-row input{
+    flex:1;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;
+    padding:11px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .convert-row select:focus, .convert-row input:focus{outline:none;border-color:var(--brass);}
+  .convert-arrow{font-size:18px;color:var(--slate-dim);text-align:center;max-width:400px;margin-bottom:10px;}
+  .convert-result{
+    flex:1;background:var(--panel-raised);border:1px solid var(--line);color:var(--brass-soft);
+    padding:11px 14px;border-radius:6px;font-family:'Bebas Neue',sans-serif;font-size:20px;
+  }
+
+  /* ---- Formula Sheet ---- */
+  .formula-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(240px,1fr));gap:12px;}
+  .formula-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 4px 12px rgba(0,0,0,0.18);}
+  .formula-name{font-family:'Bebas Neue',sans-serif;font-size:16px;color:#F5F1E8;letter-spacing:.02em;margin-bottom:8px;}
+  .formula-expr{font-family:'IBM Plex Mono',monospace;font-size:15px;color:var(--brass-soft);margin-bottom:6px;}
+  .formula-note{font-size:11.5px;color:var(--slate-dim);line-height:1.4;}
+  .formula-subject-tag{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--brass-soft);
+    text-transform:uppercase;letter-spacing:.08em;
+    border:1px solid rgba(224,172,63,0.3);border-radius:4px;padding:2px 8px;
+  }
+  .formula-tags{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;}
+  .formula-tier-tag{
+    display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;
+    text-transform:uppercase;letter-spacing:.08em;border-radius:4px;padding:2px 8px;
+  }
+  .formula-tier-tag.tier-ks3{color:var(--signal);border:1px solid rgba(111,224,160,0.35);}
+  .formula-tier-tag.tier-gcse{color:var(--brass-soft);border:1px solid rgba(224,172,63,0.35);}
+  .formula-tier-tag.tier-alevel{color:#e08a7a;border:1px solid rgba(224,138,122,0.35);}
+
+  /* ---- Vocabulary Builder ---- */
+  .vocab-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;position:relative;box-shadow:0 4px 12px rgba(0,0,0,0.18);}
+  .vocab-word{font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F5F1E8;letter-spacing:.02em;margin-bottom:8px;padding-right:24px;}
+  .vocab-def{font-size:13px;color:var(--slate);line-height:1.5;margin-bottom:8px;}
+  .vocab-example{font-size:12.5px;color:var(--slate-dim);font-style:italic;line-height:1.5;}
+
+  /* ---- Ambient Sounds ---- */
+  .sound-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(230px,1fr));gap:14px;}
+  .sound-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.18);
+  }
+  .sound-card.playing{border-color:rgba(224,135,92,0.4);}
+  .sound-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .sound-card-title{font-family:'Bebas Neue',sans-serif;font-size:18px;color:#F5F1E8;letter-spacing:.02em;}
+  .sound-toggle{
+    width:36px;height:36px;border-radius:50%;background:var(--panel-raised);border:1px solid var(--line);
+    color:var(--slate);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;
+    flex-shrink:0;transition:background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .sound-toggle:hover{border-color:var(--accent-orange);color:#F5F1E8;}
+  .sound-toggle.playing{background:var(--accent-orange);border-color:var(--accent-orange);color:var(--ink);}
+  .sound-volume{width:100%;accent-color:var(--accent-orange);}
+  .vocab-del{position:absolute;top:14px;right:14px;color:var(--slate-dim);cursor:pointer;font-size:16px;}
+  .vocab-del:hover{color:var(--danger, #C1604A);}
+  .riddle-answer-row input{
+    flex:1;background:var(--ink);border:1px solid var(--line);color:#F5F1E8;
+    padding:10px 14px;border-radius:6px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .riddle-answer-row input:focus{outline:none;border-color:var(--brass);}
+  .riddle-feedback{font-size:13px;font-family:'IBM Plex Mono',monospace;color:var(--slate-dim);min-height:18px;}
+  .riddle-feedback.incorrect{color:var(--danger, #C1604A);}
+
+  /* ---- Games (shared) ---- */
+  .game-score{
+    font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--brass-soft);
+    background:var(--panel);border:1px solid var(--line);border-radius:6px;
+    padding:8px 14px;flex-shrink:0;margin-top:4px;
+  }
+  .game-stage{position:relative;display:flex;flex-direction:column;align-items:center;}
+  .game-overlay{
+    position:absolute;inset:0;background:rgba(11,21,48,0.85);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+    border-radius:8px;
+  }
+  .game-overlay-text{font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F5F1E8;letter-spacing:.03em;text-align:center;padding:0 20px;}
+  #snakeCanvas{background:var(--panel);border:1px solid var(--line);border-radius:8px;display:block;max-width:100%;height:auto;}
+
+  .grid-2048{
+    display:grid;grid-template-columns:repeat(4, 76px);grid-template-rows:repeat(4, 76px);
+    gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-2048{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--ink);
+    background:var(--panel-raised);color:transparent;transition:background .1s ease;
+  }
+  .tile-2048[data-v]{color:#2A2410;}
+  .tile-2048[data-v="2"]{background:#EDE6D6;}
+  .tile-2048[data-v="4"]{background:#E5D9B6;}
+  .tile-2048[data-v="8"]{background:var(--brass-soft);color:#2A2410;}
+  .tile-2048[data-v="16"]{background:var(--brass);color:#2A2410;}
+  .tile-2048[data-v="32"]{background:#d99a3f;color:#fff;}
+  .tile-2048[data-v="64"]{background:#c9762c;color:#fff;}
+  .tile-2048[data-v="128"]{background:#c15a2c;color:#fff;font-size:22px;}
+  .tile-2048[data-v="256"]{background:#b84a2c;color:#fff;font-size:22px;}
+  .tile-2048[data-v="512"]{background:var(--signal);color:#08281a;font-size:22px;}
+  .tile-2048[data-v="1024"]{background:#3f9a6e;color:#fff;font-size:19px;}
+  .tile-2048[data-v="2048"]{background:#c9a24b;color:#fff;font-size:19px;box-shadow:0 0 16px rgba(224,172,63,0.7);}
+
+  .grid-puzzle15{
+    display:grid;grid-template-columns:repeat(4, 76px);grid-template-rows:repeat(4, 76px);
+    gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-puzzle15{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    font-family:'Bebas Neue',sans-serif;font-size:24px;color:var(--ink);
+    background:var(--brass);cursor:pointer;transition:background .1s ease;
+  }
+  .tile-puzzle15:hover{background:var(--brass-soft);}
+  .tile-puzzle15.empty{background:transparent;cursor:default;}
+
+  .reaction-stats{display:grid;grid-template-columns:repeat(2, minmax(120px,1fr));gap:12px;max-width:300px;margin-bottom:24px;}
+  .reaction-box{
+    width:100%;max-width:520px;height:260px;border-radius:12px;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    background:var(--panel);border:1px solid var(--line);
+    font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F5F1E8;letter-spacing:.03em;
+    transition:background .15s ease;user-select:none;
+  }
+  .reaction-box.waiting{background:#5a2a2a;}
+  .reaction-box.go{background:var(--signal);color:#08281a;}
+  .reaction-box.early{background:#5a2a2a;}
+
+  .grid-ttt{
+    display:grid;grid-template-columns:repeat(3, 96px);grid-template-rows:repeat(3, 96px);
+    gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+  }
+  .tile-ttt{
+    display:flex;align-items:center;justify-content:center;border-radius:6px;
+    background:var(--panel-raised);cursor:pointer;
+    font-family:'Bebas Neue',sans-serif;font-size:44px;
+    transition:background .1s ease;
+  }
+  .tile-ttt:hover{background:#243668;}
+  .tile-ttt.x{color:var(--brass-soft);}
+  .tile-ttt.o{color:var(--signal);}
+  .tile-ttt.filled{cursor:default;}
+  .tile-ttt.filled:hover{background:var(--panel-raised);}
+
+  .grid-connect4{
+    display:grid;grid-template-columns:repeat(7, 50px);grid-template-rows:repeat(6, 50px);
+    gap:6px;background:#1D2C5C;border:1px solid var(--line);border-radius:8px;padding:10px;
+  }
+  .cell-connect4{
+    width:50px;height:50px;border-radius:50%;background:var(--ink);cursor:pointer;
+    transition:background .15s ease;
+  }
+  .cell-connect4:hover{background:var(--panel-raised);}
+  .cell-connect4.red{background:var(--accent-red);cursor:default;}
+  .cell-connect4.yellow{background:var(--brass);cursor:default;}
+
+  .chain-display{
+    display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:20px;margin-bottom:16px;min-height:60px;
+  }
+  .chain-word{
+    font-family:'IBM Plex Mono',monospace;font-size:13px;padding:7px 14px;
+    border-radius:20px;background:var(--panel-raised);border:1px solid var(--line);color:#F5F1E8;
+  }
+  .chain-word.you{border-color:rgba(224,172,63,0.35);color:var(--brass-soft);}
+  .chain-word.claude{border-color:rgba(111,224,160,0.35);color:var(--signal);}
+  .chain-arrow{color:var(--slate-dim);font-size:14px;}
+
+  .riddle-feedback.answered{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:14px;padding:10px 16px;border-radius:6px;
+  }
+  .riddle-feedback.correct.answered{
+    background:rgba(111,224,160,0.1);border:1px solid rgba(111,224,160,0.35);color:var(--signal);
+  }
+  .riddle-feedback.revealed.answered{
+    background:rgba(224,172,63,0.1);border:1px solid rgba(224,172,63,0.35);color:var(--brass-soft);
+  }
+  .timer-btn:disabled{opacity:0.4;cursor:default;}
+  .timer-btn:disabled:hover{border-color:var(--line);color:var(--slate);transform:none;}
+
+  /* ---- Responsive ---- */
+  @media (max-width: 640px){
+    nav{padding:14px 22px;}
+    .nav-links{gap:16px;}
+    .nav-search-wrap{display:none;}
+    .nav-pin-badge{display:none !important;}
+    .brand-name{font-size:17px;}
+    .hero{padding:70px 22px 80px 22px;}
+    .hero h1{font-size:40px;}
+    .cursor{height:30px;vertical-align:-4px;}
+    .widget-row{gap:10px;}
+    .widget{min-width:140px;padding:12px 16px;}
+    .widget-main{font-size:22px;}
+    main{padding:40px 22px;}
+
+    /* Headers with a badge/buttons alongside the title need to wrap, not overflow */
+    .chat-head{flex-wrap:wrap;}
+    .riddle-buttons{flex-wrap:wrap;}
+
+    /* AI Assistant sidebar becomes a horizontal strip above the chat, not a side column */
+    main.chat-with-sidebar{flex-direction:column;}
+    .chat-sidebar{width:100%;max-height:140px;box-sizing:border-box;}
+
+    /* Fixed-cell game grids shrink to fit narrow screens instead of overflowing */
+    .calc-grid{grid-template-columns:repeat(4, minmax(0, 1fr));max-width:100%;}
+    .calc-display{max-width:100%;}
+    .grid-2048{grid-template-columns:repeat(4, minmax(0, 1fr));}
+    .grid-puzzle15{grid-template-columns:repeat(4, minmax(0, 1fr));}
+    .grid-ttt{grid-template-columns:repeat(3, minmax(0, 1fr));}
+    .grid-connect4{grid-template-columns:repeat(7, minmax(0, 1fr));}
+    .tile-2048{font-size:20px;}
+    .tile-puzzle15{font-size:18px;}
+    .tile-ttt{font-size:34px;}
+    .cell-connect4{width:auto;height:auto;aspect-ratio:1;}
+  }
 </style>
 </head>
 <body>
-  <form class="card" method="POST">
-    <h1>Guest Access — Owner Only</h1>
-    ${error ? `<div class="error">${error}</div>` : ''}
-    <input type="hidden" name="action" value="view">
-    <input type="text" name="owner_username" placeholder="Owner username" autofocus required>
-    <input type="password" name="owner_password" placeholder="Owner password" required>
-    <button type="submit">Enter</button>
-  </form>
+
+<nav>
+  <div class="brand-name" id="brandName">Shaurya's Hub</div>
+  <div class="nav-search-wrap" id="globalSearchWrap">
+    <input type="text" id="globalSearch" class="nav-search-input" placeholder="Search pages, formulas, vocab..." oninput="handleGlobalSearch()" onkeydown="if(event.key==='Escape') closeGlobalSearch();">
+    <div class="nav-search-results" id="globalSearchResults"></div>
+  </div>
+  <div class="nav-links">
+    <div class="nav-pin-badge" id="navPinBadge" style="display:none;" onclick="switchView('countdown')"></div>
+    <div class="nav-call-bar" id="navCallBar" style="display:none;">
+      <span id="navCallText"></span>
+      <button onclick="toggleMuteVoiceCall()" id="navMuteBtn">Mute</button>
+      <button onclick="endVoiceCall(true)">Hang Up</button>
+    </div>
+    <a class="nav-link" href="/admin" style="text-decoration:none;">Admin</a>
+    <div class="nav-link active" id="navToggle" onclick="switchView('home')">Home</div>
+  </div>
+</nav>
+
+<div class="view visible active" id="view-welcome">
+  <div class="hero">
+    <canvas id="matrixCanvas" class="matrix-canvas"></canvas>
+    <div class="hero-inner">
+      <div class="hero-eyebrow"><span class="rule"></span>Personal workspace</div>
+      <h1 id="title-welcome"><span class="title-text"></span><span class="cursor"></span></h1>
+      <div class="sub">This is your space — built for whatever you decide to put here next.</div>
+      <div class="status-line"><span class="status-dot"></span><span id="statusText">System Ready</span></div>
+
+      <div class="widget-row">
+        <div class="widget" id="clockWidget">
+          <div class="widget-label">Local time</div>
+          <div class="widget-main" id="clockTime">--:--</div>
+          <div class="widget-sub" id="clockDate">Loading...</div>
+        </div>
+        <div class="widget" id="weatherWidget">
+          <div class="widget-label">Weather</div>
+          <div class="widget-main" id="weatherTemp">--°</div>
+          <div class="widget-sub" id="weatherDesc">Loading...</div>
+        </div>
+      </div>
+
+      <div class="fact-card">
+        <div class="fact-label">Did you know</div>
+        <div class="fact-text-wrap">
+          <div class="fact-text" id="factA"></div>
+          <div class="fact-text" id="factB"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="view" id="view-home">
+  <main>
+    <div class="view-head">
+      <h2 id="title-home"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Jump into a section — this fills up as we build more of the site.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" data-hub="chat" onclick="switchView('chat')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 10h8M8 14h5"/></svg></div>
+        <div class="hub-card-title">AI Assistant</div>
+        <div class="hub-card-desc">A clear, simplified assistant — helps with anything, especially good for working through schoolwork.</div>
+      </div>
+      <div class="hub-card" data-hub="study" onclick="switchView('study')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M2 9l10-5 10 5-10 5-10-5z"/><path d="M6 12v4c0 1.1 2.7 2 6 2s6-.9 6-2v-4"/></svg></div>
+        <div class="hub-card-title">Study Hub</div>
+        <div class="hub-card-desc">Assignments, deadlines, notes, and everything else school-related, in one place.</div>
+      </div>
+      <div class="hub-card" data-hub="entertainment" onclick="switchView('entertainment')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="20" height="9" rx="4"/><path d="M7 11v3M5.5 12.5h3"/><circle cx="16" cy="11" r="1" fill="currentColor" stroke="none"/><circle cx="18.5" cy="14" r="1" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Entertainment Hub</div>
+        <div class="hub-card-desc">Playlists and anything else that's just for fun.</div>
+      </div>
+      <div class="hub-card" data-hub="games" onclick="switchView('games')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="3"/><line x1="12" y1="9" x2="12" y2="16"/><rect x="6" y="16" width="12" height="4" rx="1"/></svg></div>
+        <div class="hub-card-title">Game Hub</div>
+        <div class="hub-card-desc">Snake, 2048, a sliding puzzle, and a reaction test.</div>
+      </div>
+      <div class="hub-card" data-hub="utilities" onclick="switchView('utilities')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a3 3 0 0 0-4.24 4.24L4 17l3 3 6.46-6.46a3 3 0 0 0 4.24-4.24l-2.3 2.3-2-2 2.3-2.3z"/></svg></div>
+        <div class="hub-card-title">Utilities Hub</div>
+        <div class="hub-card-desc">Small everyday tools — calculator, QR codes, passwords, and more.</div>
+      </div>
+      <div class="hub-card" data-hub="challenges" onclick="switchView('challenges')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M12 2l2.5 6.5H21l-5.5 4 2 6.5-5.5-4-5.5 4 2-6.5L3 8.5h6.5z"/></svg></div>
+        <div class="hub-card-title">Challenges Hub</div>
+        <div class="hub-card-desc">One new challenge a day, same for everyone — build a streak.</div>
+      </div>
+      <div class="hub-card" data-hub="multiplayer" onclick="switchView('multiplayer')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><path d="M2 20c0-3 2.5-5 6-5s6 2 6 5M11 20c0-3 2.5-5 6-5s6 2 6 5"/></svg></div>
+        <div class="hub-card-title">Multiplayer Hub</div>
+        <div class="hub-card-desc">Whoever else is on the site right now — chat live, no waiting.</div>
+      </div>
+    </div>
+    <div style="text-align:center;margin-top:32px;">
+      <button class="timer-btn primary" onclick="surpriseMe()">🎲 Surprise Me</button>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-chat">
+  <main class="chat-with-sidebar">
+    <div class="chat-sidebar">
+      <div class="chat-sidebar-new-row">
+        <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+        <button class="new-project-btn" onclick="createNewProject()" title="New Project">+ Project</button>
+      </div>
+      <input type="text" id="chatSearchInput" class="chat-search-input" placeholder="Search chats..." oninput="renderConversationList()">
+      <div class="chat-conv-list" id="chatConvList"></div>
+      <div class="chat-memory-toggle" onclick="toggleMemoryViewer()">What I remember about you</div>
+      <div class="chat-memory-viewer" id="chatMemoryViewer"></div>
+      <div class="chat-sidebar-profile">
+        <div class="chat-sidebar-avatar" id="chatSidebarAvatar"></div>
+        <div class="chat-sidebar-name" id="chatSidebarName"></div>
+      </div>
+    </div>
+
+    <div id="moveToProjectModal" class="call-choice-overlay" style="display:none;">
+      <div class="call-choice-box">
+        <div class="call-choice-title">Move chat</div>
+        <div class="call-choice-sub">Choose a project, or remove it from one.</div>
+        <div id="moveToProjectList" class="move-to-project-list"></div>
+        <button class="call-choice-cancel" onclick="closeMoveToProjectModal()">Cancel</button>
+      </div>
+    </div>
+
+    <div class="chat-main-area">
+      <div class="view-head chat-head">
+        <div>
+          <h2>AI Assistant</h2>
+          <div class="view-sub" id="chatModeSub">Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight.</div>
+        </div>
+        <div class="chat-head-actions">
+          <div class="chat-overflow-wrapper">
+            <button class="chat-overflow-btn" onclick="toggleChatOverflowMenu()" title="More options">⋮</button>
+            <div id="chatOverflowMenu" class="chat-overflow-menu">
+              <button onclick="exportCurrentConversation();closeChatOverflowMenu();">Export chat</button>
+              <button onclick="deleteCurrentChat();closeChatOverflowMenu();">Delete chat</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="chatlog"></div>
+      <div id="chatImagePreview" class="chat-image-preview"></div>
+      <div class="chat-input-wrapper">
+        <button id="attachBtn" class="attach-btn-inline" onclick="document.getElementById('chatImageInput').click()" title="Attach an image">+</button>
+        <input type="file" id="chatImageInput" accept="image/*" style="display:none;" onchange="handleImageSelected(this.files[0])">
+        <div class="mode-selector-wrapper">
+          <button id="modeSelectorBtn" class="mode-selector-btn" onclick="toggleModeSelector()">
+            <span id="modeSelectorLabel">Walk me through it</span>
+            <span class="mode-selector-caret">▾</span>
+          </button>
+          <div id="modeSelectorMenu" class="mode-selector-menu">
+            <button onclick="selectChatMode('guided')">
+              <span class="mode-selector-option-title">Walk me through it</span>
+              <span class="mode-selector-option-desc">Hints and guided reasoning first</span>
+            </button>
+            <button onclick="selectChatMode('direct')">
+              <span class="mode-selector-option-title">Just give me the answer</span>
+              <span class="mode-selector-option-desc">Straight to the point, no hints</span>
+            </button>
+          </div>
+        </div>
+        <textarea id="chatInput" class="chat-input-inline" placeholder="Ask anything..." rows="1" oninput="autoGrowChatInput()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+        <button id="sendBtn" class="send-btn-inline" onclick="sendChat()" title="Send" aria-label="Send">↑</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-timer">
+  <main class="timer-main">
+    <div class="view-head">
+      <h2>Focus Timer</h2>
+      <div class="view-sub">20 minutes focused, then a 5 minute break. Repeats until you stop it.</div>
+    </div>
+
+    <div class="timer-ring-wrap">
+      <svg class="timer-ring" viewBox="0 0 300 300">
+        <circle class="ring-track" cx="150" cy="150" r="130"></circle>
+        <circle class="ring-progress" id="ringProgress" cx="150" cy="150" r="130"></circle>
+      </svg>
+      <div class="timer-center">
+        <div class="timer-phase" id="timerPhase">Focus</div>
+        <div class="timer-display" id="timerDisplay">20:00</div>
+      </div>
+    </div>
+
+    <div class="timer-controls">
+      <button class="timer-btn primary" id="timerStartBtn" onclick="toggleTimer()">Start</button>
+      <button class="timer-btn" onclick="skipPhase()">Skip</button>
+      <button class="timer-btn" onclick="resetTimer()">Reset</button>
+    </div>
+    <div class="timer-sessions">Focus sessions completed: <span id="sessionCount">0</span></div>
+  </main>
+</div>
+
+<div class="view" id="view-study">
+  <main>
+    <div class="view-head">
+      <h2 id="title-study"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Everything school-related, in one place — click into any section below.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('timer')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+        <div class="hub-card-title">Focus Timer</div>
+        <div class="hub-card-desc">20 minutes focused, 5 minutes off — back to back, for as long as you need.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('formulas')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M17 4H7l5 8-5 8h10"/></svg></div>
+        <div class="hub-card-title">Formula Sheet</div>
+        <div class="hub-card-desc">Maths, physics, and chemistry formulas — built in, nothing to maintain.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('vocab')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 5c2-1 5-1 8 0v14c-3-1-6-1-8 0V5z"/><path d="M20 5c-2-1-5-1-8 0v14c3-1 6-1 8 0V5z"/></svg></div>
+        <div class="hub-card-title">Vocabulary Builder</div>
+        <div class="hub-card-desc">The AI generates words with definitions and examples — saved permanently.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('ambient')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 4v16l-6-4v-8l6-4z"/><path d="M15 8a4 4 0 0 1 0 8"/><path d="M18 5a8 8 0 0 1 0 14"/></svg></div>
+        <div class="hub-card-title">Ambient Sounds</div>
+        <div class="hub-card-desc">Rain, white noise, and other background sound to study to. Layer as many as you like.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-ambient">
+  <main>
+    <div class="view-head">
+      <h2>Ambient Sounds</h2>
+      <div class="view-sub">Generated in the browser, not streamed — layer as many as you like, each with its own volume.</div>
+    </div>
+    <div class="sound-grid" id="soundGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-calc">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Quick Calculator</h2>
+        <div class="view-sub">Basic maths, or convert between units.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn active" id="calcModeCalc" onclick="setCalcMode('calc')">Calculator</button>
+        <button class="clear-btn" id="calcModeConvert" onclick="setCalcMode('convert')">Converter</button>
+      </div>
+    </div>
+
+    <div id="calcPanel">
+      <div class="calc-display" id="calcDisplay">0</div>
+      <div class="calc-grid">
+        <button class="calc-btn wide" onclick="calcClear()">C</button>
+        <button class="calc-btn" onclick="calcBackspace()">⌫</button>
+        <button class="calc-btn op" onclick="calcInput('/')">÷</button>
+        <button class="calc-btn" onclick="calcInput('7')">7</button>
+        <button class="calc-btn" onclick="calcInput('8')">8</button>
+        <button class="calc-btn" onclick="calcInput('9')">9</button>
+        <button class="calc-btn op" onclick="calcInput('*')">×</button>
+        <button class="calc-btn" onclick="calcInput('4')">4</button>
+        <button class="calc-btn" onclick="calcInput('5')">5</button>
+        <button class="calc-btn" onclick="calcInput('6')">6</button>
+        <button class="calc-btn op" onclick="calcInput('-')">−</button>
+        <button class="calc-btn" onclick="calcInput('1')">1</button>
+        <button class="calc-btn" onclick="calcInput('2')">2</button>
+        <button class="calc-btn" onclick="calcInput('3')">3</button>
+        <button class="calc-btn op" onclick="calcInput('+')">+</button>
+        <button class="calc-btn" onclick="calcInput('0')">0</button>
+        <button class="calc-btn" onclick="calcInput('.')">.</button>
+        <button class="calc-btn" onclick="calcInput('(')">(</button>
+        <button class="calc-btn" onclick="calcInput(')')">)</button>
+        <button class="calc-btn equals wide" onclick="calcEquals()">=</button>
+      </div>
+    </div>
+
+    <div id="convertPanel" style="display:none;">
+      <div class="convert-row">
+        <select id="convertCategory" onchange="onConvertCategoryChange()"></select>
+      </div>
+      <div class="convert-row">
+        <input type="number" id="convertInput" placeholder="Value" oninput="runConvert()">
+        <select id="convertFrom" onchange="runConvert()"></select>
+      </div>
+      <div class="convert-arrow">↓</div>
+      <div class="convert-row">
+        <div class="convert-result" id="convertResult">0</div>
+        <select id="convertTo" onchange="runConvert()"></select>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-formulas">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Formula Sheet</h2>
+        <div class="view-sub">A built-in reference — nothing to keep updated.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn active" id="formulaTabMaths" onclick="setFormulaTab('maths')">Maths</button>
+        <button class="clear-btn" id="formulaTabPhysics" onclick="setFormulaTab('physics')">Physics</button>
+        <button class="clear-btn" id="formulaTabChemistry" onclick="setFormulaTab('chemistry')">Chemistry</button>
+        <button class="clear-btn" id="formulaTabBiology" onclick="setFormulaTab('biology')">Biology</button>
+      </div>
+    </div>
+    <div class="quick-add">
+      <input id="formulaSearch" placeholder="Search all formulas..." oninput="renderFormulas()">
+    </div>
+    <div class="formula-grid" id="formulaGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-vocab">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Vocabulary Builder</h2>
+        <div class="view-sub">The AI generates the words — everything you keep is saved here permanently.</div>
+      </div>
+      <div class="game-score" id="vocabCount">Words saved: <span id="vocabCountNum">0</span></div>
+      <button class="clear-btn" id="vocabClearBtn" onclick="clearVocab()">Clear All</button>
+    </div>
+    <div class="quick-add">
+      <input id="vocabTopic" placeholder="Topic (e.g. essay writing, biology, general advanced vocab)">
+      <button onclick="generateVocab()" id="vocabGenBtn">Generate 5 Words</button>
+    </div>
+    <div class="riddle-feedback" id="vocabFeedback"></div>
+    <div class="formula-grid" id="vocabGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-entertainment">
+  <main>
+    <div class="view-head">
+      <h2 id="title-entertainment"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Playlists and anything else that's just for fun — this fills up as we build more of it.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('riddles')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3 11c1 .6 1 1.5 1 2h4c0-.5 0-1.4 1-2a6 6 0 0 0-3-11z"/></svg></div>
+        <div class="hub-card-title">Riddles &amp; Jokes</div>
+        <div class="hub-card-desc">Fresh ones generated by AI — solve a riddle or get a laugh.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('excuse')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3 2.4c-.7.3-1 .8-1 1.6"/><circle cx="11.5" cy="16.3" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Excuse Generator</div>
+        <div class="hub-card-desc">The AI generates an excuse — dial it up if it's not absurd enough.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('whichx')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 3v3a2 2 0 1 1 0 4v3H3v-3a2 2 0 1 0 0-4V3h6z"/><path d="M9 3h6v3a2 2 0 1 1 0 4v3H9"/></svg></div>
+        <div class="hub-card-title">Which X Are You?</div>
+        <div class="hub-card-desc">Name any topic, take a quiz, get an AI-judged result.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-utilities">
+  <main>
+    <div class="view-head">
+      <h2 id="title-utilities"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Small everyday tools — click into any of them.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('calc')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><circle cx="8" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="11" r=".6" fill="currentColor" stroke="none"/><circle cx="8" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="12" cy="15" r=".6" fill="currentColor" stroke="none"/><circle cx="16" cy="15" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Quick Calculator</div>
+        <div class="hub-card-desc">A calculator and a unit converter, in one place.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('wheel')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="3" x2="12" y2="21"/><line x1="3" y1="12" x2="21" y2="12"/></svg></div>
+        <div class="hub-card-title">Decision Wheel</div>
+        <div class="hub-card-desc">Type your options, spin, let it decide for you.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('password')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+        <div class="hub-card-title">Password Generator</div>
+        <div class="hub-card-desc">Random, strong passwords — pick the length and character types.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('counter')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></div>
+        <div class="hub-card-title">Word Counter</div>
+        <div class="hub-card-desc">Paste text — get word count, character count, and reading time.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('countdown')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg></div>
+        <div class="hub-card-title">Countdown Timer</div>
+        <div class="hub-card-desc">Track how long until any date you set.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('qrcode')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM19 14h2v2h-2zM14 19h2v2h-2zM19 19h2v2h-2z"/></svg></div>
+        <div class="hub-card-title">QR Code Generator</div>
+        <div class="hub-card-desc">Turn any text or link into a scannable QR code.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('timecapsule')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg></div>
+        <div class="hub-card-title">Time Capsule</div>
+        <div class="hub-card-desc">Write a message, seal it to a future date — delivered by email, not stored on the site.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-riddles">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Riddles &amp; Jokes</h2>
+        <div class="view-sub">Generated fresh by AI every time — pick one from the corner.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn" onclick="generateContent('joke')">New Joke</button>
+        <button class="clear-btn" onclick="generateContent('riddle')">New Riddle</button>
+      </div>
+    </div>
+
+    <div class="riddle-card">
+      <div class="riddle-label" id="riddleLabel">&nbsp;</div>
+      <div class="riddle-text" id="riddleText">Pick "New Joke" or "New Riddle" above to get started.</div>
+
+      <div class="riddle-answer-row" id="riddleAnswerRow" style="display:none;">
+        <input type="text" id="riddleAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" id="riddleSubmitBtn" onclick="checkRiddleAnswer()">Submit</button>
+        <button class="timer-btn" onclick="revealRiddleAnswer()">Reveal</button>
+      </div>
+      <div class="riddle-feedback" id="riddleFeedback"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-games">
+  <main>
+    <div class="view-head">
+      <h2 id="title-games"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">A few quick games — click into any of them.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('snake')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 6h6a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h8"/></svg></div>
+        <div class="hub-card-title">Snake</div>
+        <div class="hub-card-desc">Classic grid movement, growing tail, don't hit the walls.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('game2048')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg></div>
+        <div class="hub-card-title">2048</div>
+        <div class="hub-card-desc">Slide and merge tiles to reach 2048.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('puzzle15')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></div>
+        <div class="hub-card-title">15 Puzzle</div>
+        <div class="hub-card-desc">Slide the tiles back into order.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('reaction')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div>
+        <div class="hub-card-title">Reaction Test</div>
+        <div class="hub-card-desc">Click the instant it turns green. Tracks your best.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('tictactoe')"><div class="hub-icon"><svg viewBox="0 0 24 24"><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg></div>
+        <div class="hub-card-title">Tic-Tac-Toe</div>
+        <div class="hub-card-desc">Play against an AI opponent that plays optimally.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('wordchain')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="9" height="8" rx="4"/><rect x="13" y="8" width="9" height="8" rx="4"/></svg></div>
+        <div class="hub-card-title">Word Chain</div>
+        <div class="hub-card-desc">Take turns with the AI building a chain of associated words.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-snake">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Snake</h2>
+        <div class="view-sub">Arrow keys or WASD to move.</div>
+      </div>
+      <div class="game-score">Score: <span id="snakeScore">0</span></div>
+    </div>
+    <div class="game-stage">
+      <canvas id="snakeCanvas" width="360" height="360"></canvas>
+      <div class="game-overlay" id="snakeOverlay">
+        <div class="game-overlay-text">Press any arrow key to start</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-game2048">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>2048</h2>
+        <div class="view-sub">Arrow keys to slide. Matching tiles merge.</div>
+      </div>
+      <div class="game-score">Score: <span id="score2048">0</span></div>
+    </div>
+    <div class="game-stage">
+      <div class="grid-2048" id="grid2048"></div>
+      <div class="game-overlay" id="overlay2048" style="display:none;">
+        <div class="game-overlay-text" id="overlayText2048"></div>
+        <button class="timer-btn primary" onclick="init2048()">Try Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-puzzle15">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>15 Puzzle</h2>
+        <div class="view-sub">Click a tile next to the empty space to slide it.</div>
+      </div>
+      <div class="game-score">Moves: <span id="movesPuzzle">0</span></div>
+    </div>
+    <div class="game-stage">
+      <div class="grid-puzzle15" id="gridPuzzle15"></div>
+      <div class="game-overlay" id="overlayPuzzle15" style="display:none;">
+        <div class="game-overlay-text">Solved! 🎉</div>
+        <button class="timer-btn primary" onclick="initPuzzle15()">Shuffle Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-reaction">
+  <main>
+    <div class="view-head">
+      <h2>Reaction Test</h2>
+      <div class="view-sub">Click the box the instant it turns green.</div>
+    </div>
+    <div class="reaction-stats">
+      <div class="clicker-stat"><div class="cs-label">Last</div><div class="cs-value" id="reactionLast">--</div></div>
+      <div class="clicker-stat"><div class="cs-label">Best</div><div class="cs-value" id="reactionBest">--</div></div>
+    </div>
+    <div class="reaction-box" id="reactionBox" onclick="handleReactionClick()">
+      <div id="reactionText">Click to start</div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-tictactoe">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Tic-Tac-Toe</h2>
+        <div class="view-sub" id="tttSub">You're X. The AI plays optimally — a draw is a good result.</div>
+      </div>
+      <div class="riddle-buttons">
+        <button class="clear-btn" id="tttModeUnbeatable" onclick="setTttMode('unbeatable')">Unbeatable</button>
+        <button class="clear-btn" id="tttModeBeatable" onclick="setTttMode('beatable')">Beatable</button>
+      </div>
+    </div>
+    <div class="game-score" style="display:inline-block;margin-bottom:16px;">W: <span id="tttWinsNum">0</span> · L: <span id="tttLossesNum">0</span> · D: <span id="tttDrawsNum">0</span></div>
+    <div class="game-stage">
+      <div class="grid-ttt" id="gridTtt"></div>
+      <div class="game-overlay" id="overlayTtt" style="display:none;">
+        <div class="game-overlay-text" id="overlayTextTtt"></div>
+        <button class="timer-btn primary" onclick="initTtt()">Play Again</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-wordchain">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Word Chain</h2>
+        <div class="view-sub">You give a word, the AI gives one associated with it, back and forth.</div>
+      </div>
+      <div class="game-score" id="chainCount">Chain length: <span id="chainCountNum">0</span></div>
+      <button class="clear-btn" onclick="resetWordChain()">New Chain</button>
+    </div>
+    <div class="chain-display" id="chainDisplay">
+      <div class="placeholder-note">Type a word below to start the chain.</div>
+    </div>
+    <div class="quick-add">
+      <input id="wordChainInput" placeholder="Your word..." onkeydown="if(event.key==='Enter'){event.preventDefault();submitWordChain();}">
+      <button onclick="submitWordChain()" id="wordChainBtn">Add</button>
+    </div>
+    <div class="riddle-feedback" id="wordChainFeedback"></div>
+  </main>
+</div>
+
+<div class="view" id="view-excuse">
+  <main>
+    <div class="view-head">
+      <h2>Excuse Generator</h2>
+      <div class="view-sub">Tell it what you need an excuse for. The AI will happily oblige.</div>
+    </div>
+    <div class="quick-add">
+      <input id="excuseInput" placeholder="What do you need an excuse for? (e.g. being late)">
+      <button onclick="generateExcuse()">Generate</button>
+    </div>
+    <div class="riddle-card">
+      <div class="riddle-label" id="excuseLabel">&nbsp;</div>
+      <div class="riddle-text" id="excuseText">Type something above and hit Generate.</div>
+      <div class="riddle-feedback" id="excuseLevelDisplay" style="display:none;">Absurdity level: <span id="excuseLevelNum">1</span></div>
+      <button class="timer-btn primary" id="excuseMoreBtn" onclick="escalateExcuse()" style="display:none;">Make It More Absurd</button>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-whichx">
+  <main>
+    <div class="view-head">
+      <h2>Which X Are You?</h2>
+      <div class="view-sub">Name any topic — the AI builds a quiz and judges your result.</div>
+    </div>
+
+    <div id="whichxSetup">
+      <div class="quick-add">
+        <input id="whichxTopic" placeholder="e.g. Roblox game, programming language, mythical creature...">
+        <button onclick="startWhichX()" id="whichxStartBtn">Build Quiz</button>
+      </div>
+    </div>
+
+    <div id="whichxQuizArea" style="display:none;">
+      <div class="riddle-card" id="whichxQuestionCard"></div>
+    </div>
+
+    <div id="whichxResultArea" style="display:none;">
+      <div class="riddle-card">
+        <div class="riddle-label">Your Result</div>
+        <div class="riddle-text" id="whichxResultTitle" style="font-family:'Bebas Neue',sans-serif;font-size:28px;"></div>
+        <div class="riddle-text" id="whichxResultDesc"></div>
+        <button class="timer-btn primary" onclick="resetWhichX()">Try Another Topic</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-wheel">
+  <main>
+    <div class="view-head">
+      <h2>Decision Wheel</h2>
+      <div class="view-sub">Add your options, spin, and let it decide.</div>
+    </div>
+
+    <div class="quick-add">
+      <input id="wheelOptionInput" placeholder="Add an option..." onkeydown="if(event.key==='Enter'){event.preventDefault();addWheelOption();}">
+      <button onclick="addWheelOption()">Add</button>
+    </div>
+    <ul class="task-list" id="wheelOptionList"></ul>
+
+    <div class="wheel-stage">
+      <div class="wheel-pointer"></div>
+      <div class="wheel-wrap" id="wheelWrap">
+        <div class="wheel" id="wheel"></div>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <button class="timer-btn primary" onclick="spinWheel()" id="spinBtn">Spin</button>
+    </div>
+    <div class="riddle-feedback" id="wheelResult" style="text-align:center;margin-top:14px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-password">
+  <main>
+    <div class="view-head">
+      <h2>Password Generator</h2>
+      <div class="view-sub">Generated locally in your browser — never sent anywhere.</div>
+    </div>
+    <div class="riddle-card" style="max-width:500px;">
+      <div class="riddle-text" id="passwordOutput" style="font-family:'IBM Plex Mono',monospace;font-size:20px;word-break:break-all;">Click Generate below</div>
+    </div>
+    <div style="margin:18px 0;max-width:500px;">
+      <label style="font-size:13px;color:var(--slate);display:block;margin-bottom:8px;">Length: <span id="passwordLengthVal">16</span></label>
+      <input type="range" id="passwordLength" min="6" max="32" value="16" style="width:100%;accent-color:var(--accent-blue);" oninput="document.getElementById('passwordLengthVal').textContent=this.value">
+    </div>
+    <div class="upgrade-grid" style="max-width:500px;grid-template-columns:1fr 1fr;">
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passUpper" checked> Uppercase (A-Z)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passLower" checked> Lowercase (a-z)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passNumbers" checked> Numbers (0-9)</label>
+      <label style="font-size:13px;color:var(--slate);"><input type="checkbox" id="passSymbols" checked> Symbols (!@#$)</label>
+    </div>
+    <div style="margin-top:18px;display:flex;gap:10px;">
+      <button class="timer-btn primary" onclick="generatePassword()">Generate</button>
+      <button class="timer-btn" onclick="copyPassword()">Copy</button>
+    </div>
+    <div class="riddle-feedback" id="passwordFeedback"></div>
+  </main>
+</div>
+
+<div class="view" id="view-counter">
+  <main>
+    <div class="view-head">
+      <h2>Word Counter</h2>
+      <div class="view-sub">Paste or type — stats update as you go.</div>
+    </div>
+    <textarea id="counterInput" oninput="updateCounter()" placeholder="Start typing or paste text here..." style="width:100%;min-height:220px;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:16px;border-radius:8px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;resize:vertical;margin-bottom:18px;"></textarea>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(120px,1fr));gap:12px;">
+      <div class="clicker-stat"><div class="cs-label">Words</div><div class="cs-value" id="counterWords">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Characters</div><div class="cs-value" id="counterChars">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">No Spaces</div><div class="cs-value" id="counterCharsNoSpace">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Sentences</div><div class="cs-value" id="counterSentences">0</div></div>
+      <div class="clicker-stat"><div class="cs-label">Read Time</div><div class="cs-value" id="counterReadTime">0s</div></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-countdown">
+  <main>
+    <div class="view-head">
+      <h2>Countdown Timer</h2>
+      <div class="view-sub">Add a date, watch the countdown tick down live.</div>
+    </div>
+    <div class="quick-add">
+      <input id="countdownLabel" placeholder="What's it counting down to? (e.g. Exam, Birthday)">
+    </div>
+    <div class="countdown-date-row">
+      <select id="countdownDay"></select>
+      <select id="countdownMonth"></select>
+      <input type="number" id="countdownYear" placeholder="Year" min="1900" max="2999">
+      <button onclick="addCountdown()">Add</button>
+    </div>
+    <div class="sound-grid" id="countdownGrid"></div>
+  </main>
+</div>
+
+<div class="view" id="view-qrcode">
+  <main>
+    <div class="view-head">
+      <h2>QR Code Generator</h2>
+      <div class="view-sub">Type text or a link — the QR code updates live.</div>
+    </div>
+    <div class="quick-add">
+      <input id="qrInput" placeholder="Enter text or a URL..." oninput="updateQR()">
+    </div>
+    <div class="riddle-card" style="max-width:300px;text-align:center;">
+      <img id="qrImage" src="" alt="QR code" style="width:100%;border-radius:6px;display:none;">
+      <div class="placeholder-note" id="qrPlaceholder">Type something above to generate a QR code.</div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-timecapsule">
+  <main>
+    <div class="view-head">
+      <h2>Time Capsule</h2>
+      <div class="view-sub">Sealed and sent by email on the date you choose — not stored or viewable on the site, so revoking access later won't affect it.</div>
+    </div>
+    <div class="quick-add">
+      <input id="capsuleEmail" type="email" placeholder="Deliver to: email@example.com">
+    </div>
+    <textarea id="capsuleMessage" placeholder="Write your message to the future here..." style="width:100%;min-height:180px;background:var(--panel);border:1px solid var(--line);color:#F5F1E8;padding:16px;border-radius:8px;font-size:14px;font-family:'IBM Plex Sans',sans-serif;resize:vertical;margin-bottom:16px;"></textarea>
+    <div class="countdown-date-row">
+      <select id="capsuleDay"></select>
+      <select id="capsuleMonth"></select>
+      <input type="number" id="capsuleYear" placeholder="Year" min="1900" max="2999">
+      <button onclick="sealTimeCapsule()" id="capsuleSendBtn">Seal Time Capsule</button>
+    </div>
+    <div class="riddle-feedback" id="capsuleFeedback"></div>
+  </main>
+</div>
+
+<div class="view" id="view-challenges">
+  <main>
+    <div class="view-head">
+      <h2 id="title-challenges"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">A new one each day — same challenge all day, resets at midnight.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="switchView('dailytrivia')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3 2.4c-.7.3-1 .8-1 1.6"/><circle cx="11.5" cy="16.3" r=".6" fill="currentColor" stroke="none"/></svg></div>
+        <div class="hub-card-title">Daily Trivia</div>
+        <div class="hub-card-desc">One trivia question a day. Build a streak.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('dailytyping')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M7 13h10"/></svg></div>
+        <div class="hub-card-title">Daily Typing Test</div>
+        <div class="hub-card-desc">One sentence a day. Type it accurately to keep your streak.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('dailypuzzle')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M9 3v3a2 2 0 1 1 0 4v3H3v-3a2 2 0 1 0 0-4V3h6z"/><path d="M9 3h6v3a2 2 0 1 1 0 4v3H9"/></svg></div>
+        <div class="hub-card-title">Daily Puzzle</div>
+        <div class="hub-card-desc">One logic riddle a day. Solve it to keep your streak.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('dailyscramble')"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 4l8 8M12 4l-8 8M16 6h4M16 12h4M16 18h4"/></svg></div>
+        <div class="hub-card-title">Word Scramble</div>
+        <div class="hub-card-desc">Unscramble one word a day. Build a streak.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('dailymath')"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h3M13 12h3M8 16h3M13 16h3"/></svg></div>
+        <div class="hub-card-title">Math Challenge</div>
+        <div class="hub-card-desc">One quick maths problem a day. Build a streak.</div>
+      </div>
+      <div class="hub-card" onclick="switchView('dailyemoji')"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="9" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1" fill="currentColor" stroke="none"/><path d="M8 14c1 1.5 2.5 2.5 4 2.5s3-1 4-2.5"/></svg></div>
+        <div class="hub-card-title">Emoji Puzzle</div>
+        <div class="hub-card-desc">Guess the phrase from the emoji clue. Build a streak.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-dailytrivia">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Daily Trivia</h2>
+        <div class="view-sub" id="triviaDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="triviaStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="triviaCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-dailytyping">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Daily Typing Test</h2>
+        <div class="view-sub" id="typingDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="typingStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="typingCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-dailypuzzle">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Daily Puzzle</h2>
+        <div class="view-sub" id="puzzleDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="puzzleStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="puzzleDailyCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-dailyscramble">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Word Scramble</h2>
+        <div class="view-sub" id="scrambleDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="scrambleStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="scrambleCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-dailymath">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Math Challenge</h2>
+        <div class="view-sub" id="mathDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="mathStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="mathCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-dailyemoji">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Emoji Puzzle</h2>
+        <div class="view-sub" id="emojiDate"></div>
+      </div>
+      <div class="game-score">Streak: <span id="emojiStreakCount">0</span></div>
+    </div>
+    <div class="riddle-card" id="emojiCard" style="max-width:600px;"></div>
+  </main>
+</div>
+
+<div class="view" id="view-multiplayer">
+  <main>
+    <div class="view-head">
+      <h2 id="title-multiplayer"><span class="title-text"></span><span class="cursor small"></span></h2>
+      <div class="view-sub">Whoever else has the site open right now — features that happen live, together.</div>
+    </div>
+    <div class="hub-grid">
+      <div class="hub-card" onclick="openLiveChat()"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M7 21l3-3M14 21l-3-3"/></svg></div>
+        <div class="hub-card-title">Live Chat</div>
+        <div class="hub-card-desc">Talk with anyone else on the site right now — instant, not refreshed.</div>
+      </div>
+      <div class="hub-card" onclick="openDirectMessages()"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7 14.7L4 21l3.3-1a9 9 0 1 0 4.7-17z"/></svg></div>
+        <div class="hub-card-title">Direct Messages <span class="e2ee-badge" title="End-to-end encrypted — not even this site's own server can read your messages">🔒 Encrypted</span></div>
+        <div class="hub-card-desc">Private, one-to-one with whoever else is online right now.</div>
+      </div>
+      <div class="hub-card" onclick="openLiveTtt()"><div class="hub-icon"><svg viewBox="0 0 24 24"><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg></div>
+        <div class="hub-card-title">Live Tic-Tac-Toe</div>
+        <div class="hub-card-desc">Against an actual person this time — first two online take the game.</div>
+      </div>
+      <div class="hub-card" onclick="openLiveConnect4()"><div class="hub-icon"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.5"/><circle cx="12" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="12" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/></svg></div>
+        <div class="hub-card-title">Live Connect 4</div>
+        <div class="hub-card-desc">Drop pieces live against a real opponent.</div>
+      </div>
+      <div class="hub-card" onclick="openWhiteboard()"><div class="hub-icon"><svg viewBox="0 0 24 24"><path d="M4 17l4.5-1 9-9-3.5-3.5-9 9L4 17z"/><path d="M13 4.5L16.5 8"/></svg></div>
+        <div class="hub-card-title">Shared Whiteboard</div>
+        <div class="hub-card-desc">Draw together, live — anyone connected sees every stroke.</div>
+      </div>
+      <div class="hub-card" onclick="openLiveWordChain()"><div class="hub-icon"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="9" height="8" rx="4"/><rect x="13" y="8" width="9" height="8" rx="4"/></svg></div>
+        <div class="hub-card-title">Live Word Chain</div>
+        <div class="hub-card-desc">A real person building the chain with you this time, not the AI.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-livechat">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Chat</h2>
+        <div class="view-sub" id="chatConnectionStatus">Connecting...</div>
+      </div>
+      <div class="game-score"><span id="chatOnlineCount">0</span> online</div>
+    </div>
+    <div id="livechatLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:400px;overflow-y:auto;padding:20px;margin-bottom:14px;"></div>
+    <div id="liveChatTypingIndicator" style="font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;"></div>
+    <div class="chat-input-row">
+      <textarea id="livechatInput" placeholder="Message everyone here right now..." oninput="handleLiveChatTyping()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendLiveChatMessage();}"></textarea>
+      <button id="livechatSendBtn" onclick="sendLiveChatMessage()">Send</button>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-directmessages">
+  <main>
+    <div class="view-head">
+      <h2>Direct Messages <span class="e2ee-badge-inline" title="End-to-end encrypted — messages are scrambled on your device before sending, so not even this site's own server can read them.">🔒</span></h2>
+      <div class="view-sub" id="dmConnectionStatus">Connecting...</div>
+    </div>
+    <div class="dm-layout">
+      <div class="dm-sidebar">
+        <div class="cs-label" style="margin-bottom:10px;">Online now</div>
+        <div id="dmContactList"></div>
+      </div>
+      <div class="dm-main">
+        <div class="dm-conversation-header">
+          <div class="cs-label" id="dmConversationHeader" style="margin-bottom:0;">Pick someone online to start a conversation.</div>
+          <button class="clear-btn" id="voiceCallBtn" onclick="openCallChoiceModal()" style="display:none;">Call</button>
+        </div>
+
+        <div id="callChoiceModal" class="call-choice-overlay" style="display:none;">
+          <div class="call-choice-box">
+            <div class="call-choice-title">Start a call</div>
+            <div class="call-choice-sub">How do you want to call <span id="callChoicePartnerName"></span>?</div>
+            <div class="call-choice-buttons">
+              <button class="call-choice-btn" onclick="confirmStartCall(false)">
+                <span class="call-choice-icon">🎙️</span>
+                <span>Voice Only</span>
+              </button>
+              <button class="call-choice-btn" onclick="confirmStartCall(true)">
+                <span class="call-choice-icon">📹</span>
+                <span>Video</span>
+              </button>
+            </div>
+            <button class="call-choice-cancel" onclick="closeCallChoiceModal()">Cancel</button>
+          </div>
+        </div>
+
+        <div id="callStatusPanel" class="call-status-panel">
+          <div id="incomingCallBanner" class="call-panel-inner" style="display:none;">
+            <div id="incomingCallText" style="font-size:14px;color:#F5F1E8;"></div>
+            <div style="display:flex;gap:8px;">
+              <button class="timer-btn primary" onclick="acceptVoiceCall()">Accept</button>
+              <button class="timer-btn" onclick="rejectVoiceCall()">Decline</button>
+            </div>
+          </div>
+
+          <div id="activeCallBar" class="call-panel-inner" style="display:none;">
+            <div id="activeCallText" style="font-size:14px;color:var(--signal);"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="timer-btn" id="muteCallBtn" onclick="toggleMuteVoiceCall()">Mute</button>
+              <button class="timer-btn" id="cameraCallBtn" onclick="toggleCameraVoiceCall()" style="display:none;">Camera Off</button>
+              <button class="timer-btn" id="screenShareBtn" onclick="toggleScreenShare()">Share Screen</button>
+              <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+            </div>
+          </div>
+
+          <div id="videoCallArea" class="video-call-panel" style="display:none;">
+            <video id="remoteCallVideo" autoplay playsinline style="width:100%;display:block;max-height:360px;object-fit:cover;background:#000;"></video>
+            <video id="localCallVideo" autoplay playsinline muted style="position:absolute;bottom:10px;right:10px;width:110px;border-radius:6px;border:2px solid var(--panel-raised);object-fit:cover;"></video>
+            <div id="callReactionsOverlay" style="position:absolute;inset:0;pointer-events:none;overflow:hidden;"></div>
+            <button id="fullscreenCallBtn" class="fullscreen-toggle-btn" onclick="toggleCallFullscreen()" title="Fullscreen">⛶</button>
+            <div style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px;">
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👍')">👍</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('❤️')">❤️</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('😂')">😂</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('🎉')">🎉</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👏')">👏</button>
+            </div>
+            <div class="fullscreen-only-controls">
+              <button class="timer-btn" onclick="toggleMuteVoiceCall()">Mute</button>
+              <button class="timer-btn" onclick="toggleCameraVoiceCall()">Camera</button>
+              <button class="timer-btn" onclick="toggleScreenShare()">Share Screen</button>
+              <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="dmConversationLog" class="dm-log"></div>
+        <div id="dmTypingIndicator" class="dm-typing-indicator"></div>
+        <div class="chat-input-row">
+          <textarea id="dmInput" placeholder="Type a direct message..." oninput="handleDmTyping()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDirectMessage();}"></textarea>
+          <button id="dmSendBtn" onclick="sendDirectMessage()">Send</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-livettt">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Tic-Tac-Toe</h2>
+        <div class="view-sub" id="tttLiveStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendTttReset()">Reset Game</button>
+    </div>
+    <div class="game-stage" id="tttGameStage" style="position:relative;">
+      <div class="grid-ttt" id="gridLiveTtt"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-liveconnect4">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Connect 4</h2>
+        <div class="view-sub" id="connect4LiveStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendConnect4Reset()">Reset Game</button>
+    </div>
+    <div class="game-stage" id="connect4GameStage" style="position:relative;">
+      <div class="grid-connect4" id="gridLiveConnect4"></div>
+    </div>
+  </main>
+</div>
+
+<div class="view" id="view-whiteboard">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Shared Whiteboard</h2>
+        <div class="view-sub" id="whiteboardStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="clearWhiteboard()">Clear Board</button>
+    </div>
+    <canvas id="whiteboardCanvas" width="700" height="400" style="background:#fff;border-radius:8px;cursor:crosshair;max-width:100%;touch-action:none;"></canvas>
+  </main>
+</div>
+
+<div class="view" id="view-livewordchain">
+  <main>
+    <div class="view-head chat-head">
+      <div>
+        <h2>Live Word Chain</h2>
+        <div class="view-sub" id="liveWordChainStatus">Connecting...</div>
+      </div>
+      <button class="clear-btn" onclick="sendLiveWordChainReset()">New Chain</button>
+    </div>
+    <div class="chain-display" id="liveWordChainDisplay">
+      <div class="placeholder-note">Waiting for a chain to start.</div>
+    </div>
+    <div class="quick-add">
+      <input id="liveWordChainInput" placeholder="Your word..." onkeydown="if(event.key==='Enter'){event.preventDefault();sendLiveWordChainMove();}">
+      <button onclick="sendLiveWordChainMove()" id="liveWordChainSendBtn">Add</button>
+    </div>
+    <div class="riddle-feedback" id="liveWordChainFeedback"></div>
+  </main>
+</div>
+
+<script>
+  /* ---- View switching ---- */
+  const BRAND_LABELS = {
+    welcome: "Shaurya's Hub", home: "Home", chat: "AI Assistant", timer: "Focus Timer",
+    study: "Study Hub", entertainment: "Entertainment Hub", riddles: "Riddles & Jokes",
+    games: "Game Hub", snake: "Snake", game2048: "2048", puzzle15: "15 Puzzle", reaction: "Reaction Test",
+    tictactoe: "Tic-Tac-Toe", wordchain: "Word Chain",
+    excuse: "Excuse Generator", whichx: "Which X Are You?", wheel: "Decision Wheel",
+    calc: "Quick Calculator", formulas: "Formula Sheet", vocab: "Vocabulary Builder", ambient: "Ambient Sounds",
+    utilities: "Utilities Hub", password: "Password Generator", counter: "Word Counter",
+    countdown: "Countdown Timer", qrcode: "QR Code Generator", timecapsule: "Time Capsule",
+    challenges: "Challenges Hub", dailytrivia: "Daily Trivia", dailytyping: "Daily Typing Test", dailypuzzle: "Daily Puzzle",
+    dailyscramble: "Word Scramble", dailymath: "Math Challenge", dailyemoji: "Emoji Puzzle",
+    multiplayer: "Multiplayer Hub", livechat: "Live Chat", directmessages: "Direct Messages",
+    livettt: "Live Tic-Tac-Toe", liveconnect4: "Live Connect 4", whiteboard: "Shared Whiteboard",
+    livewordchain: "Live Word Chain"
+  };
+  const NAV_TOGGLE = {
+    welcome: { label: 'Home', target: 'home' },
+    home: { label: 'Welcome Hub', target: 'welcome' },
+    chat: { label: 'Home', target: 'home' },
+    timer: { label: 'Study Hub', target: 'study' },
+    study: { label: 'Home', target: 'home' },
+    entertainment: { label: 'Home', target: 'home' },
+    riddles: { label: 'Entertainment Hub', target: 'entertainment' },
+    games: { label: 'Home', target: 'home' },
+    snake: { label: 'Game Hub', target: 'games' },
+    game2048: { label: 'Game Hub', target: 'games' },
+    puzzle15: { label: 'Game Hub', target: 'games' },
+    reaction: { label: 'Game Hub', target: 'games' },
+    tictactoe: { label: 'Game Hub', target: 'games' },
+    wordchain: { label: 'Game Hub', target: 'games' },
+    excuse: { label: 'Entertainment Hub', target: 'entertainment' },
+    whichx: { label: 'Entertainment Hub', target: 'entertainment' },
+    formulas: { label: 'Study Hub', target: 'study' },
+    vocab: { label: 'Study Hub', target: 'study' },
+    ambient: { label: 'Study Hub', target: 'study' },
+    utilities: { label: 'Home', target: 'home' },
+    calc: { label: 'Utilities Hub', target: 'utilities' },
+    wheel: { label: 'Utilities Hub', target: 'utilities' },
+    password: { label: 'Utilities Hub', target: 'utilities' },
+    counter: { label: 'Utilities Hub', target: 'utilities' },
+    countdown: { label: 'Utilities Hub', target: 'utilities' },
+    qrcode: { label: 'Utilities Hub', target: 'utilities' },
+    timecapsule: { label: 'Utilities Hub', target: 'utilities' },
+    challenges: { label: 'Home', target: 'home' },
+    dailytrivia: { label: 'Challenges Hub', target: 'challenges' },
+    dailytyping: { label: 'Challenges Hub', target: 'challenges' },
+    dailypuzzle: { label: 'Challenges Hub', target: 'challenges' },
+    dailyscramble: { label: 'Challenges Hub', target: 'challenges' },
+    dailymath: { label: 'Challenges Hub', target: 'challenges' },
+    dailyemoji: { label: 'Challenges Hub', target: 'challenges' },
+    multiplayer: { label: 'Home', target: 'home' },
+    livechat: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    directmessages: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    livettt: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    liveconnect4: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    whiteboard: { label: 'Multiplayer Hub', target: 'multiplayer' },
+    livewordchain: { label: 'Multiplayer Hub', target: 'multiplayer' }
+  };
+
+  /* ---- Shared count-up animation ---- */
+  function animateNumber(el, newValue, opts){
+    opts = opts || {};
+    const suffix = opts.suffix || '';
+    const duration = opts.duration || 600;
+    const oldValue = parseFloat(el.dataset.countVal || '0') || 0;
+    el.dataset.countVal = newValue;
+
+    if(oldValue === newValue){
+      el.textContent = newValue + suffix;
+      return;
+    }
+
+    // Visible bump so even a +1 change (which has no in-between integer to roll through) is noticeable
+    el.classList.remove('count-pop');
+    void el.offsetWidth; // restart the animation if it's already mid-pop
+    el.classList.add('count-pop');
+
+    let start = null; // set from the first rAF timestamp itself, never from a separately-captured clock
+    function step(now){
+      if(start === null) start = now;
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+      const current = Math.round(oldValue + (newValue - oldValue) * eased);
+      el.textContent = current + suffix;
+      if(progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  const SCROLL_ACCENTS = {
+    study: 'var(--accent-orange)', timer: 'var(--accent-orange)',
+    formulas: 'var(--accent-orange)', vocab: 'var(--accent-orange)', ambient: 'var(--accent-orange)',
+    entertainment: 'var(--accent-violet)', riddles: 'var(--accent-violet)', excuse: 'var(--accent-violet)',
+    whichx: 'var(--accent-violet)',
+    games: 'var(--accent-teal)', snake: 'var(--accent-teal)', game2048: 'var(--accent-teal)',
+    puzzle15: 'var(--accent-teal)', reaction: 'var(--accent-teal)', tictactoe: 'var(--accent-teal)', wordchain: 'var(--accent-teal)',
+    utilities: 'var(--accent-blue)', calc: 'var(--accent-blue)', wheel: 'var(--accent-blue)',
+    password: 'var(--accent-blue)', counter: 'var(--accent-blue)', countdown: 'var(--accent-blue)', qrcode: 'var(--accent-blue)', timecapsule: 'var(--accent-blue)',
+    challenges: 'var(--accent-red)', dailytrivia: 'var(--accent-red)', dailytyping: 'var(--accent-red)', dailypuzzle: 'var(--accent-red)',
+    dailyscramble: 'var(--accent-red)', dailymath: 'var(--accent-red)', dailyemoji: 'var(--accent-red)',
+    multiplayer: 'var(--accent-pink)', livechat: 'var(--accent-pink)', directmessages: 'var(--accent-pink)',
+    livettt: 'var(--accent-pink)', liveconnect4: 'var(--accent-pink)', whiteboard: 'var(--accent-pink)',
+    livewordchain: 'var(--accent-pink)'
+  };
+
+  let currentActiveView = 'welcome';
+
+  function reportGuestActivity(view){
+    if(!window.__GUEST_USERNAME__) return;
+    const friendly = BRAND_LABELS[view] || view;
+    fetch('/__report_activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: window.__GUEST_USERNAME__, view: friendly })
+    }).catch(() => {});
+  }
+
+  /* ---- Guest hub restrictions: which top-level hub each page belongs to ---- */
+  const HUB_GROUPS = {
+    chat: 'chat',
+    study: 'study', timer: 'study', formulas: 'study', vocab: 'study', ambient: 'study',
+    entertainment: 'entertainment', riddles: 'entertainment', excuse: 'entertainment', whichx: 'entertainment',
+    games: 'games', snake: 'games', game2048: 'games', puzzle15: 'games', reaction: 'games', tictactoe: 'games', wordchain: 'games',
+    utilities: 'utilities', calc: 'utilities', wheel: 'utilities', password: 'utilities', counter: 'utilities',
+    countdown: 'utilities', qrcode: 'utilities', timecapsule: 'utilities',
+    challenges: 'challenges', dailytrivia: 'challenges', dailytyping: 'challenges', dailypuzzle: 'challenges',
+    dailyscramble: 'challenges', dailymath: 'challenges', dailyemoji: 'challenges',
+    multiplayer: 'multiplayer', livechat: 'multiplayer', directmessages: 'multiplayer',
+    livettt: 'multiplayer', liveconnect4: 'multiplayer', whiteboard: 'multiplayer',
+    livewordchain: 'multiplayer'
+  };
+
+  function isViewAllowed(view){
+    const allowed = window.__GUEST_ALLOWED_HUBS__;
+    if(!allowed || allowed.length === 0) return true; // no restriction set — full access
+    const group = HUB_GROUPS[view];
+    if(!group) return true; // welcome/home and anything ungrouped stays reachable
+    return allowed.indexOf(group) !== -1;
+  }
+
+  const SURPRISE_POOL = [
+    'chat',
+    'timer', 'calc', 'formulas', 'vocab', 'ambient',
+    'riddles', 'excuse', 'whichx',
+    'snake', 'game2048', 'puzzle15', 'reaction', 'tictactoe', 'wordchain',
+    'password', 'counter', 'countdown', 'qrcode', 'timecapsule', 'wheel',
+    'dailytrivia', 'dailytyping', 'dailypuzzle', 'dailyscramble', 'dailymath', 'dailyemoji',
+    'livechat', 'directmessages', 'livettt', 'liveconnect4', 'whiteboard', 'livewordchain'
+  ];
+
+  function surpriseMe(){
+    const pool = SURPRISE_POOL.filter(isViewAllowed);
+    if(pool.length === 0) return;
+    const choice = pool[Math.floor(Math.random() * pool.length)];
+    switchView(choice);
+  }
+
+  function switchView(view){
+    if(!isViewAllowed(view)) return; // guest isn't permitted into this hub — do nothing
+
+    const current = document.querySelector('.view.visible');
+    const target = document.getElementById('view-' + view);
+    if(!target || current === target) return;
+
+    document.getElementById('brandName').textContent = BRAND_LABELS[view] || "Shaurya's Hub";
+    const nav = NAV_TOGGLE[view];
+    if(nav){
+      const navEl = document.getElementById('navToggle');
+      navEl.textContent = nav.label;
+      navEl.onclick = () => switchView(nav.target);
+    }
+
+    document.documentElement.style.setProperty('--scroll-accent', SCROLL_ACCENTS[view] || 'var(--brass-dim)');
+    currentActiveView = view;
+    reportGuestActivity(view);
+
+    if(current){
+      current.classList.remove('active'); // fades/slides the old page out
+      setTimeout(() => current.classList.remove('visible'), 420);
+    }
+
+    setTimeout(() => {
+      target.classList.add('visible');
+      void target.offsetWidth; // force reflow so the transition actually plays
+      target.classList.add('active');
+      typeTitle(view);
+    }, current ? 210 : 0);
+  }
+
+  /* ---- Global search ---- */
+  const PAGE_INDEX = [
+    { label: 'Home', view: 'home' },
+    { label: 'AI Assistant', view: 'chat' },
+    { label: 'Study Hub', view: 'study' },
+    { label: 'Focus Timer', view: 'timer' },
+    { label: 'Quick Calculator', view: 'calc' },
+    { label: 'Formula Sheet', view: 'formulas' },
+    { label: 'Vocabulary Builder', view: 'vocab' },
+    { label: 'Entertainment Hub', view: 'entertainment' },
+    { label: 'Riddles & Jokes', view: 'riddles' },
+    { label: 'Game Hub', view: 'games' },
+    { label: 'Snake', view: 'snake' },
+    { label: '2048', view: 'game2048' },
+    { label: '15 Puzzle', view: 'puzzle15' },
+    { label: 'Reaction Test', view: 'reaction' },
+    { label: 'Tic-Tac-Toe', view: 'tictactoe' },
+    { label: 'Word Chain', view: 'wordchain' },
+    { label: 'Excuse Generator', view: 'excuse' },
+    { label: 'Which X Are You?', view: 'whichx' },
+    { label: 'Decision Wheel', view: 'wheel' }
+  ];
+
+  let searchResultActions = [];
+
+  function handleGlobalSearch(){
+    const query = document.getElementById('globalSearch').value.trim().toLowerCase();
+    const resultsEl = document.getElementById('globalSearchResults');
+
+    if(!query){
+      resultsEl.style.display = 'none';
+      resultsEl.innerHTML = '';
+      return;
+    }
+
+    let results = [];
+
+    PAGE_INDEX.forEach(p => {
+      if(p.label.toLowerCase().includes(query)){
+        results.push({ type: 'Page', label: p.label, action: () => switchView(p.view) });
+      }
+    });
+
+    if(typeof FORMULAS !== 'undefined'){
+      Object.entries(FORMULAS).forEach(([subject, list]) => {
+        list.forEach(f => {
+          if(f.name.toLowerCase().includes(query) || f.expr.toLowerCase().includes(query)){
+            results.push({
+              type: 'Formula', label: f.name, sub: f.expr,
+              action: () => {
+                switchView('formulas');
+                setTimeout(() => {
+                  const searchBox = document.getElementById('formulaSearch');
+                  if(searchBox){ searchBox.value = f.name; renderFormulas(); }
+                }, 250);
+              }
+            });
+          }
+        });
+      });
+    }
+
+    if(typeof vocabList !== 'undefined'){
+      vocabList.forEach(v => {
+        if(v.word.toLowerCase().includes(query) || v.definition.toLowerCase().includes(query)){
+          results.push({ type: 'Vocab', label: v.word, sub: v.definition, action: () => switchView('vocab') });
+        }
+      });
+    }
+
+    results = results.slice(0, 8);
+    searchResultActions = results;
+
+    if(results.length === 0){
+      resultsEl.innerHTML = '<div class="search-result-empty">No matches found.</div>';
+    }else{
+      resultsEl.innerHTML = results.map((r, i) => `
+        <div class="search-result-item" data-idx="${i}">
+          <span class="search-result-type">${r.type}</span>
+          <span class="search-result-label">${escapeHtml(r.label)}</span>
+          ${r.sub ? `<span class="search-result-sub">${escapeHtml(r.sub)}</span>` : ''}
+        </div>
+      `).join('');
+      resultsEl.querySelectorAll('.search-result-item').forEach(el => {
+        el.addEventListener('click', () => {
+          const idx = parseInt(el.dataset.idx);
+          searchResultActions[idx].action();
+          closeGlobalSearch();
+        });
+      });
+    }
+    resultsEl.style.display = 'block';
+  }
+
+  function closeGlobalSearch(){
+    document.getElementById('globalSearch').value = '';
+    document.getElementById('globalSearchResults').style.display = 'none';
+    document.getElementById('globalSearchResults').innerHTML = '';
+  }
+
+  document.addEventListener('click', e => {
+    const wrap = document.getElementById('globalSearchWrap');
+    if(wrap && !wrap.contains(e.target)) closeGlobalSearch();
+  });
+
+
+  /* ---- Title typing effect ---- */
+  const TITLE_TEXTS = {
+    welcome: 'Welcome back, Shaurya Kshitij',
+    home: 'What will you do today?',
+    chat: 'AI Assistant',
+    timer: 'Focus Timer',
+    study: 'Study Hub',
+    calc: 'Quick Calculator',
+    formulas: 'Formula Sheet',
+    vocab: 'Vocabulary Builder',
+    entertainment: 'Entertainment Hub',
+    riddles: 'Riddles & Jokes',
+    games: 'Game Hub',
+    snake: 'Snake',
+    game2048: '2048',
+    puzzle15: '15 Puzzle',
+    reaction: 'Reaction Test',
+    tictactoe: 'Tic-Tac-Toe',
+    wordchain: 'Word Chain',
+    excuse: 'Excuse Generator',
+    whichx: 'Which X Are You?',
+    wheel: 'Decision Wheel',
+    utilities: 'Utilities Hub',
+    challenges: 'Challenges Hub',
+    multiplayer: 'Multiplayer Hub'
+  };
+
+  function typeTitle(view){
+    const container = document.getElementById('title-' + view);
+    let text = TITLE_TEXTS[view];
+    if(view === 'welcome' && window.__GUEST_USERNAME__){
+      text = 'Welcome back, ' + window.__GUEST_USERNAME__;
+    }
+    if(!container || !text) return;
+    const span = container.querySelector('.title-text');
+    if(!span) return;
+
+    clearInterval(span._typeInterval);
+    span.textContent = '';
+    let i = 0;
+    span._typeInterval = setInterval(() => {
+      span.textContent += text[i];
+      i++;
+      if(i >= text.length) clearInterval(span._typeInterval);
+    }, 35);
+  }
+
+  /* ---- Guest welcome sequence: types the owner's name, then "corrects" it to the guest's username ---- */
+  function typeCharsInto(span, text, speed){
+    return new Promise(resolve => {
+      let i = 0;
+      const interval = setInterval(() => {
+        span.textContent += text[i];
+        i++;
+        if(i >= text.length){ clearInterval(interval); resolve(); }
+      }, speed);
+    });
+  }
+
+  function backspaceChars(span, count, speed){
+    return new Promise(resolve => {
+      let removed = 0;
+      const interval = setInterval(() => {
+        span.textContent = span.textContent.slice(0, -1);
+        removed++;
+        if(removed >= count){ clearInterval(interval); resolve(); }
+      }, speed);
+    });
+  }
+
+  function wait(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function typeWelcomeGuestSequence(username){
+    const container = document.getElementById('title-welcome');
+    if(!container) return;
+    const span = container.querySelector('.title-text');
+    const cursorEl = container.querySelector('.cursor');
+    if(!span) return;
+
+    const fullText = TITLE_TEXTS.welcome; // "Welcome back, Shaurya Kshitij"
+    const namePart = 'Shaurya Kshitij';
+
+    span.textContent = '';
+    await typeCharsInto(span, fullText, 35);
+
+    if(cursorEl) cursorEl.classList.add('cursor-paused');
+    await wait(1000);
+
+    await backspaceChars(span, namePart.length, 40);
+
+    if(cursorEl) cursorEl.classList.remove('cursor-paused');
+    await typeCharsInto(span, username, 35);
+  }
+
+  /* ---- AI chat ---- */
+  function getUserDisplayName(){
+    if(window.__GUEST_USERNAME__){
+      return window.__GUEST_FIRST_NAME__ || window.__GUEST_USERNAME__;
+    }
+    return 'Shaurya';
+  }
+
+  function getChatMode(){
+    return localStorage.getItem('chatMode') || 'guided'; // 'guided' or 'direct'
+  }
+
+  function toggleModeSelector(){
+    const menu = document.getElementById('modeSelectorMenu');
+    if(!menu) return;
+    const opening = !menu.classList.contains('visible');
+    if(opening){
+      const mode = getChatMode();
+      menu.querySelectorAll('button').forEach((btn, i) => {
+        const btnMode = i === 0 ? 'guided' : 'direct';
+        btn.classList.toggle('current', btnMode === mode);
+      });
+    }
+    menu.classList.toggle('visible');
+  }
+
+  function closeModeSelector(){
+    const menu = document.getElementById('modeSelectorMenu');
+    if(menu) menu.classList.remove('visible');
+  }
+
+  function selectChatMode(mode){
+    localStorage.setItem('chatMode', mode);
+    applyChatModeToUI();
+    closeModeSelector();
+  }
+
+  document.addEventListener('click', (e) => {
+    if(!e.target.closest('.mode-selector-wrapper')){
+      closeModeSelector();
+    }
+  });
+
+  function toggleChatOverflowMenu(){
+    const menu = document.getElementById('chatOverflowMenu');
+    if(menu) menu.classList.toggle('visible');
+  }
+
+  function closeChatOverflowMenu(){
+    const menu = document.getElementById('chatOverflowMenu');
+    if(menu) menu.classList.remove('visible');
+  }
+
+  document.addEventListener('click', (e) => {
+    const wrapper = document.querySelector('.chat-overflow-wrapper');
+    if(wrapper && !wrapper.contains(e.target)){
+      closeChatOverflowMenu();
+    }
+  });
+
+  function applyChatModeToUI(){
+    const mode = getChatMode();
+    const label = document.getElementById('modeSelectorLabel');
+    const sub = document.getElementById('chatModeSub');
+    if(label){
+      label.textContent = mode === 'guided' ? 'Walk me through it' : 'Just give me the answer';
+    }
+    if(sub){
+      sub.textContent = mode === 'guided'
+        ? "Speaks plainly, keeps things simple, and won't just hand you the answer unless you ask for it straight."
+        : "Gives you the direct answer straight away, no hints or guided reasoning first.";
+    }
+  }
+
+  function buildChatSystemPrompt(){
+    const name = getUserDisplayName();
+    const schoolContext = window.__GUEST_USERNAME__ ? '' : ', a student at Wallington County Grammar School';
+    const mode = getChatMode();
+    const rule3 = mode === 'guided'
+      ? `3. Do not just hand over the direct answer to a question straight away. Guide ${name} toward it — ask a clarifying question, give a hint, or walk through the reasoning — unless they explicitly ask you to just give them the answer directly (e.g. "just tell me", "give me the answer", "skip the hints").`
+      : `3. Give ${name} the direct, complete answer straight away — no hints, no guided questions, no withholding it first. Still explain your reasoning alongside the answer, just don't make them work for it.`;
+    return `You are a helpful, general-purpose assistant for ${name}${schoolContext}. Follow these rules:
+
+1. Speak clearly and simply. Avoid jargon and complex wording — explain things the way you'd explain them to someone who wants the plain, easy-to-follow version, not the technical one, unless ${name} specifically wants technical depth.
+2. Give simplified explanations by default. Break things down into their basic idea first.
+${rule3}
+4. You are a general assistant, not exclusively a study tool — help with anything ${name} brings up. But you're especially strong at helping with schoolwork and computer science topics, and should lean into that when it's relevant.
+5. Keep responses concise. Don't pad answers with unnecessary preamble.
+6. If ${name} asks for something that's really a document — a report, essay, letter, story, or anything meant to be saved or handed in, not just read in chat — write a short line introducing it, then include the actual content wrapped EXACTLY like this, with nothing else inside the markers:
+[[DOCUMENT type="docx" title="Short Title Here"]]
+# Main Heading
+A regular paragraph of text.
+## A Section Heading
+- A bullet point
+- Another bullet point
+**A bold standalone line, if needed**
+[[/DOCUMENT]]
+Use type="docx" for reports, essays, letters, and anything long-form. Use type="pdf" instead only if ${name} specifically asks for a PDF, a flyer, or a one-page printable thing. Use # for the one main title, ## for section headings, lines starting with - for bullet points, and a whole line wrapped in ** for a bold standalone line. Don't use any other markdown — no tables, no numbered lists, no nested bullets, no inline bold mid-sentence. Keep it to plain paragraphs, headings, and bullets only. Never use this format for a normal conversational answer — only when ${name} genuinely wants a document out of it.`;
+  }
+
+  /* ---- AI-generated document downloads (Word docs / PDFs) ---- */
+  // Detects the [[DOCUMENT ...]] marker the AI is instructed to use when the
+  // user wants something saved as a real file, rather than just read in chat.
+  function parseDocumentMarker(fullText){
+    const match = fullText.match(/\[\[DOCUMENT type="(docx|pdf)" title="([^"]*)"\]\]([\s\S]*?)\[\[\/DOCUMENT\]\]/);
+    if(!match) return null;
+    return { type: match[1], title: (match[2] || 'Document').trim(), content: match[3].trim() };
+  }
+
+  // Deliberately simple, matching the deliberately simple format the AI is asked
+  // to use — headings, bullets, plain paragraphs, and whole-line bold only.
+  function parseDocumentBlocks(content){
+    const blocks = [];
+    for(const rawLine of content.split('\n')){
+      const line = rawLine.trim();
+      if(!line) continue;
+      if(line.startsWith('## ')){
+        blocks.push({ type: 'heading2', text: line.slice(3).trim() });
+      }else if(line.startsWith('# ')){
+        blocks.push({ type: 'heading1', text: line.slice(2).trim() });
+      }else if(line.startsWith('- ') || line.startsWith('* ')){
+        blocks.push({ type: 'bullet', text: line.slice(2).trim() });
+      }else{
+        const boldMatch = line.match(/^\*\*(.+)\*\*$/);
+        if(boldMatch){
+          blocks.push({ type: 'paragraph', text: boldMatch[1], bold: true });
+        }else{
+          blocks.push({ type: 'paragraph', text: line.replace(/\*\*/g, ''), bold: false });
+        }
+      }
+    }
+    return blocks;
+  }
+
+  async function generateDocxBlob(title, blocks){
+    const { Document, Paragraph, Packer, TextRun, HeadingLevel } = docx;
+    const children = [ new Paragraph({ text: title, heading: HeadingLevel.TITLE }) ];
+    for(const b of blocks){
+      if(b.type === 'heading1'){
+        children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_1, spacing: { before: 240, after: 120 } }));
+      }else if(b.type === 'heading2'){
+        children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_2, spacing: { before: 200, after: 100 } }));
+      }else if(b.type === 'bullet'){
+        children.push(new Paragraph({ text: b.text, bullet: { level: 0 }, spacing: { after: 60 } }));
+      }else{
+        children.push(new Paragraph({
+          children: [ new TextRun({ text: b.text, bold: !!b.bold }) ],
+          spacing: { after: 120 },
+        }));
+      }
+    }
+    const doc = new Document({ sections: [{ children }] });
+    return await Packer.toBlob(doc);
+  }
+
+  function generatePdfBlob(title, blocks){
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 20;
+    const maxWidth = pageWidth - margin * 2;
+    let y = 22;
+
+    function checkPageBreak(neededSpace){
+      if(y + neededSpace > 280){ doc.addPage(); y = 20; }
+    }
+    function writeLines(text, size, style, indent, lineGap, afterGap){
+      doc.setFont('helvetica', style);
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(text, maxWidth - indent);
+      checkPageBreak(lines.length * lineGap + 4);
+      doc.text(lines, margin + indent, y);
+      y += lines.length * lineGap + afterGap;
+    }
+
+    writeLines(title, 20, 'bold', 0, 9, 8);
+    for(const b of blocks){
+      if(b.type === 'heading1') writeLines(b.text, 15, 'bold', 0, 7, 6);
+      else if(b.type === 'heading2') writeLines(b.text, 12.5, 'bold', 0, 6, 5);
+      else if(b.type === 'bullet') writeLines('•  ' + b.text, 11, 'normal', 4, 5.5, 3);
+      else writeLines(b.text, 11, b.bold ? 'bold' : 'normal', 0, 5.5, 5);
+    }
+    return doc.output('blob');
+  }
+
+  function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadGeneratedDocument(msgIndex){
+    const doc = chatHistory[msgIndex] && chatHistory[msgIndex].document;
+    if(!doc) return;
+    const blocks = parseDocumentBlocks(doc.content);
+    const safeFilename = doc.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'document';
+    try{
+      if(doc.type === 'docx'){
+        const blob = await generateDocxBlob(doc.title, blocks);
+        downloadBlob(blob, `${safeFilename}.docx`);
+      }else{
+        const blob = generatePdfBlob(doc.title, blocks);
+        downloadBlob(blob, `${safeFilename}.pdf`);
+      }
+    }catch(e){
+      alert("Something went wrong generating that file — try asking the AI to write it again.");
+    }
+  }
+
+  function exportCurrentConversation(){
+    if(chatHistory.length === 0){
+      alert('Nothing to export yet — this chat is empty.');
+      return;
+    }
+    const lines = chatHistory.map(m => {
+      const who = m.role === 'user' ? 'You' : 'AI';
+      const imageNote = m.image ? ' [Image attached]' : (m.imageRemoved ? ' [Image attached — not saved]' : '');
+      return `${who}: ${m.content}${imageNote}`;
+    });
+    const text = lines.join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const activeConv = conversationList.find(c => c.id === currentConversationId);
+    const filenameBase = activeConv ? activeConv.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase() : 'chat';
+    a.download = `${filenameBase || 'chat'}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  let chatHistory = [];
+  let currentConversationId = null;
+  let conversationList = [];
+  let userMemoryNotes = '';
+  let pendingImage = null; // { mimeType, data (base64), previewUrl }
+
+  function handleImageSelected(file){
+    if(!file) return;
+    if(!file.type.startsWith('image/')){
+      alert('Please choose an image file.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = function(e){
+      const img = new Image();
+      img.onload = function(){
+        // Resize to a reasonable max dimension and re-compress — phone photos can be
+        // several MB, which is unnecessarily large to send and wastes tokens.
+        const MAX_DIM = 1280;
+        let { width, height } = img;
+        if(width > MAX_DIM || height > MAX_DIM){
+          const scale = MAX_DIM / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        const base64 = dataUrl.split(',')[1];
+
+        pendingImage = { mimeType: 'image/jpeg', data: base64, previewUrl: dataUrl };
+        renderImagePreview();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderImagePreview(){
+    const previewEl = document.getElementById('chatImagePreview');
+    if(!previewEl) return;
+    if(!pendingImage){
+      previewEl.classList.remove('visible');
+      previewEl.innerHTML = '';
+      return;
+    }
+    previewEl.innerHTML = `
+      <img src="${pendingImage.previewUrl}" alt="Attached image">
+      <button class="chat-image-preview-remove" onclick="removeImagePreview()">Remove</button>
+    `;
+    previewEl.classList.add('visible');
+  }
+
+  function removeImagePreview(){
+    pendingImage = null;
+    document.getElementById('chatImageInput').value = '';
+    renderImagePreview();
+  }
+
+  function autoGrowChatInput(){
+    const el = document.getElementById('chatInput');
+    if(!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }
+
+  function chatIdentity(){
+    return window.__GUEST_USERNAME__ || '';
+  }
+
+  async function loadMemoryNotes(){
+    try{
+      const response = await fetch('/__ai_memory_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      userMemoryNotes = data.notes || '';
+    }catch(e){ userMemoryNotes = ''; }
+  }
+
+  function toggleMemoryViewer(){
+    const viewer = document.getElementById('chatMemoryViewer');
+    if(!viewer) return;
+    const isVisible = viewer.classList.contains('visible');
+    if(isVisible){
+      viewer.classList.remove('visible');
+      return;
+    }
+    renderMemoryViewerContent();
+    viewer.classList.add('visible');
+  }
+
+  function renderMemoryViewerContent(){
+    const viewer = document.getElementById('chatMemoryViewer');
+    if(!viewer) return;
+    const notes = userMemoryNotes.trim();
+    viewer.innerHTML = notes
+      ? `<div class="chat-memory-text">${escapeHtml(notes)}</div><button class="chat-memory-forget-btn" onclick="forgetMemory()">Forget this</button>`
+      : `<div class="chat-memory-text">Nothing remembered yet — it builds up as you chat.</div>`;
+  }
+
+  async function forgetMemory(){
+    try{
+      await fetch('/__ai_memory_delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+    }catch(e){ /* deleting is a courtesy — a failed request shouldn't get stuck mid-way */ }
+    userMemoryNotes = '';
+    renderMemoryViewerContent();
+  }
+
+  // Called whenever a conversation is left behind (switching chats, or starting a
+  // new one) — asks the AI what's actually worth remembering from it, then saves
+  // that as a short note. Runs in the background; never blocks the UI on it.
+  async function extractAndSaveMemory(outgoingHistory){
+    if(!outgoingHistory || outgoingHistory.length < 2) return; // nothing meaningful to learn from a near-empty chat
+    try{
+      const extractionPrompt = `Based on this conversation, write 1-3 short, durable facts worth remembering about this user for future conversations (things like their subjects, ongoing projects, or how they like things explained) — not the specific questions they asked. Reply with just the facts, one per line, no preamble. If genuinely nothing durable stood out, reply with exactly: NONE`;
+      const summary = await callGeminiChat(outgoingHistory, extractionPrompt);
+      if(summary && summary.trim() && summary.trim().toUpperCase() !== 'NONE'){
+        await fetch('/__ai_memory_save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), notes: summary.trim() })
+        });
+        loadMemoryNotes(); // refresh so the very next message already benefits from it
+      }
+    }catch(e){ /* memory extraction is a courtesy — never let it disrupt the actual chat */ }
+  }
+
+  let projectList = [];
+  let collapsedProjects = new Set(JSON.parse(localStorage.getItem('collapsedProjects') || '[]'));
+  let moveToProjectConvId = null;
+
+  async function loadConversationList(){
+    try{
+      const response = await fetch('/__ai_conv_list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      conversationList = Array.isArray(data.conversations) ? data.conversations : [];
+    }catch(e){ conversationList = []; }
+    await loadProjectList();
+    renderConversationList();
+    updateSidebarProfile();
+  }
+
+  async function loadProjectList(){
+    try{
+      const response = await fetch('/__ai_project_list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      projectList = Array.isArray(data.projects) ? data.projects : [];
+    }catch(e){ projectList = []; }
+  }
+
+  function updateSidebarProfile(){
+    const name = getUserDisplayName();
+    const avatarEl = document.getElementById('chatSidebarAvatar');
+    const nameEl = document.getElementById('chatSidebarName');
+    if(avatarEl) avatarEl.textContent = (name || '?').charAt(0).toUpperCase();
+    if(nameEl) nameEl.textContent = name;
+  }
+
+  function sortByPinnedThenRecency(list){
+    // Pinned items float to the top; JS's sort is stable, so recency order
+    // within each group (already sorted by the server) is preserved.
+    return [...list].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  }
+
+  function renderConvItemHtml(c){
+    return `
+      <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
+        <span class="chat-conv-title">${c.pinned ? '📌 ' : ''}${escapeHtml(c.title)}</span>
+        <div class="chat-conv-overflow-wrapper">
+          <button class="chat-conv-overflow-btn" onclick="event.stopPropagation();toggleConvOverflowMenu('${c.id}')">⋮</button>
+          <div class="chat-conv-overflow-menu" id="convOverflow-${c.id}">
+            <button onclick="event.stopPropagation();togglePinConversation('${c.id}');closeAllConvOverflowMenus();">${c.pinned ? 'Unpin' : 'Pin'}</button>
+            <button onclick="event.stopPropagation();startRenameConversation('${c.id}');closeAllConvOverflowMenus();">Rename</button>
+            <button onclick="event.stopPropagation();openMoveToProjectModal('${c.id}');closeAllConvOverflowMenus();">Move to project</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderConversationList(){
+    const container = document.getElementById('chatConvList');
+    if(!container) return;
+
+    const searchInput = document.getElementById('chatSearchInput');
+    const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+    const visible = query
+      ? conversationList.filter(c => c.title.toLowerCase().includes(query))
+      : conversationList;
+
+    if(conversationList.length === 0){
+      container.innerHTML = `<div class="chat-sidebar-empty">No past chats yet.</div>`;
+      return;
+    }
+    if(visible.length === 0 && projectList.length === 0){
+      container.innerHTML = `<div class="chat-sidebar-empty">No chats match that search.</div>`;
+      return;
+    }
+
+    let html = '';
+
+    // Grouped by project, in the order they were created
+    for(const project of projectList){
+      const items = sortByPinnedThenRecency(visible.filter(c => c.projectId === project.id));
+      if(items.length === 0 && query) continue; // hide empty groups while actively searching
+      const isCollapsed = collapsedProjects.has(project.id);
+      html += `
+        <div class="chat-project-group ${isCollapsed ? 'collapsed' : ''}">
+          <div class="chat-project-header" onclick="toggleProjectCollapse('${project.id}')">
+            <div class="chat-project-header-left">
+              <span class="chat-project-caret">▾</span>
+              <span class="chat-project-header-title">${escapeHtml(project.name)}</span>
+            </div>
+            <div class="chat-conv-overflow-wrapper">
+              <button class="chat-conv-overflow-btn" style="display:block;" onclick="event.stopPropagation();toggleConvOverflowMenu('project-${project.id}')">⋮</button>
+              <div class="chat-conv-overflow-menu" id="convOverflow-project-${project.id}">
+                <button onclick="event.stopPropagation();renameProject('${project.id}');closeAllConvOverflowMenus();">Rename</button>
+                <button onclick="event.stopPropagation();deleteProject('${project.id}');closeAllConvOverflowMenus();">Delete project</button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-project-items">
+            ${items.length > 0 ? items.map(renderConvItemHtml).join('') : '<div class="chat-sidebar-empty" style="padding:4px 10px;">No chats yet</div>'}
+          </div>
+        </div>
+      `;
+    }
+
+    // Ungrouped conversations sit below any project groups
+    const ungrouped = sortByPinnedThenRecency(visible.filter(c => !c.projectId));
+    html += ungrouped.map(renderConvItemHtml).join('');
+
+    container.innerHTML = html || `<div class="chat-sidebar-empty">No chats match that search.</div>`;
+  }
+
+  function toggleConvOverflowMenu(id){
+    const menu = document.getElementById('convOverflow-' + id);
+    const wasVisible = menu && menu.classList.contains('visible');
+    closeAllConvOverflowMenus();
+    if(menu && !wasVisible) menu.classList.add('visible');
+  }
+
+  function closeAllConvOverflowMenus(){
+    document.querySelectorAll('.chat-conv-overflow-menu.visible').forEach(m => m.classList.remove('visible'));
+  }
+
+  document.addEventListener('click', (e) => {
+    if(!e.target.closest('.chat-conv-overflow-wrapper')){
+      closeAllConvOverflowMenus();
+    }
+  });
+
+  function toggleProjectCollapse(id){
+    if(collapsedProjects.has(id)) collapsedProjects.delete(id);
+    else collapsedProjects.add(id);
+    localStorage.setItem('collapsedProjects', JSON.stringify([...collapsedProjects]));
+    renderConversationList();
+  }
+
+  async function createNewProject(){
+    const name = prompt('Name this project:');
+    if(!name || !name.trim()) return;
+    try{
+      await fetch('/__ai_project_create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), name: name.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function renameProject(id){
+    const existing = projectList.find(p => p.id === id);
+    const newName = prompt('Rename this project:', existing ? existing.name : '');
+    if(!newName || !newName.trim()) return;
+    try{
+      await fetch('/__ai_project_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id, name: newName.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function deleteProject(id){
+    const existing = projectList.find(p => p.id === id);
+    if(!confirm(`Delete "${existing ? existing.name : 'this project'}"? Chats inside it won't be deleted, just moved back out.`)) return;
+    try{
+      await fetch('/__ai_project_delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  function openMoveToProjectModal(convId){
+    moveToProjectConvId = convId;
+    const conv = conversationList.find(c => c.id === convId);
+    const listEl = document.getElementById('moveToProjectList');
+    if(!listEl) return;
+
+    let html = `<button class="move-to-project-option ${!conv || !conv.projectId ? 'current' : ''}" onclick="moveConversationToProject(null)">No Project</button>`;
+    html += projectList.map(p => `
+      <button class="move-to-project-option ${conv && conv.projectId === p.id ? 'current' : ''}" onclick="moveConversationToProject('${p.id}')">${escapeHtml(p.name)}</button>
+    `).join('');
+    listEl.innerHTML = html;
+
+    const modal = document.getElementById('moveToProjectModal');
+    if(modal) modal.style.display = 'flex';
+  }
+
+  function closeMoveToProjectModal(){
+    const modal = document.getElementById('moveToProjectModal');
+    if(modal) modal.style.display = 'none';
+    moveToProjectConvId = null;
+  }
+
+  async function moveConversationToProject(projectId){
+    if(!moveToProjectConvId) return;
+    try{
+      await fetch('/__ai_conv_set_project', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: moveToProjectConvId, projectId })
+      });
+    }catch(e){ /* ignore */ }
+    closeMoveToProjectModal();
+    await loadConversationList();
+  }
+
+  async function togglePinConversation(id){
+    try{
+      await fetch('/__ai_conv_pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function startRenameConversation(id){
+    const existing = conversationList.find(c => c.id === id);
+    const newTitle = prompt('Rename this chat:', existing ? existing.title : '');
+    if(!newTitle || !newTitle.trim()) return;
+    try{
+      await fetch('/__ai_conv_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id, title: newTitle.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function openConversation(id){
+    if(id === currentConversationId) return; // already there, nothing to switch away from
+    const outgoing = chatHistory;
+    extractAndSaveMemory(outgoing); // fire-and-forget — don't block switching on this
+
+    try{
+      const response = await fetch('/__ai_conv_load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+      const data = await response.json();
+      chatHistory = Array.isArray(data.messages) ? data.messages : [];
+    }catch(e){ chatHistory = []; }
+    currentConversationId = id;
+    renderChat();
+    renderConversationList();
+  }
+
+  function startNewChat(){
+    const outgoing = chatHistory;
+    if(currentConversationId !== null || outgoing.length > 0){
+      extractAndSaveMemory(outgoing); // fire-and-forget
+    }
+    chatHistory = [];
+    currentConversationId = null;
+    renderChat();
+    renderConversationList();
+  }
+
+  async function saveCurrentConversation(){
+    if(chatHistory.length === 0) return;
+    const isBrandNewConversation = currentConversationId === null;
+    try{
+      // Images aren't persisted to storage — they're only sent to the AI for the live
+      // exchange. Saving raw base64 image data in every conversation would make storage
+      // balloon fast, so a lightweight marker is kept instead of the actual image.
+      const messagesForStorage = chatHistory.map(m => {
+        if(!m.image) return m;
+        const { image, ...rest } = m;
+        return { ...rest, imageRemoved: true };
+      });
+
+      const response = await fetch('/__ai_conv_save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: currentConversationId, messages: messagesForStorage })
+      });
+      const data = await response.json();
+      if(data.ok){
+        currentConversationId = data.id; // assigns the real id the first time a new chat is saved
+        await loadConversationList();
+        if(isBrandNewConversation){
+          generateSmartTitle(currentConversationId); // fire-and-forget, don't block on it
+        }
+      }
+    }catch(e){ /* saving is a courtesy — a failed save shouldn't interrupt the chat itself */ }
+  }
+
+  // Generates a genuine short title summarizing the conversation, rather than
+  // just truncating the first message — triggered once, right after a brand
+  // new conversation's first exchange completes.
+  async function generateSmartTitle(conversationId){
+    try{
+      const titlePrompt = 'Reply with ONLY a short title (3 to 6 words) summarizing this conversation. Do not use bullet points, lists, markdown formatting, asterisks, or any explanation — output nothing but the plain title text itself, on a single line.';
+      const rawTitle = await callGeminiChat(chatHistory, titlePrompt);
+
+      // Defensive cleanup — the model doesn't always follow formatting instructions
+      // perfectly (e.g. can slip into a bulleted list if the conversation itself
+      // was list-shaped), so this strips markdown/list artifacts no matter what
+      // actually comes back, rather than trusting the raw response as-is.
+      let cleaned = rawTitle
+        .replace(/[*_#`]/g, '')
+        .split('\n')
+        .map(line => line.replace(/^[\s\-•]+/, '').trim())
+        .find(line => line.length > 0) || '';
+      cleaned = cleaned.replace(/^["']|["']$/g, '').trim();
+      if(cleaned.length > 60) cleaned = cleaned.slice(0, 60).trim() + '…';
+      if(!cleaned) return;
+
+      await fetch('/__ai_conv_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: conversationId, title: cleaned })
+      });
+      if(conversationId === currentConversationId){
+        await loadConversationList();
+      }
+    }catch(e){ /* if this fails, the plain truncated title from the save endpoint just stays as-is */ }
+  }
+
+  async function deleteCurrentChat(){
+    if(currentConversationId){
+      try{
+        await fetch('/__ai_conv_delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: chatIdentity(), id: currentConversationId })
+        });
+      }catch(e){ /* ignore */ }
+    }
+    startNewChat();
+    await loadConversationList();
+  }
+
+  /* ---- Focus Timer ---- */
+  const FOCUS_LENGTH = 20 * 60;
+  const BREAK_LENGTH = 5 * 60;
+  const RING_CIRCUMFERENCE = 2 * Math.PI * 130;
+
+  let timerPhase = 'focus';
+  let timerRemaining = FOCUS_LENGTH;
+  let timerInterval = null;
+  let sessionsCompleted = 0;
+
+  function formatTime(s){
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+  }
+
+  function updateTimerDisplay(){
+    document.getElementById('timerDisplay').textContent = formatTime(timerRemaining);
+    const phaseEl = document.getElementById('timerPhase');
+    const isBreak = timerPhase === 'break';
+    phaseEl.textContent = isBreak ? 'Break' : 'Focus';
+    phaseEl.classList.toggle('break', isBreak);
+    animateNumber(document.getElementById('sessionCount'), sessionsCompleted);
+
+    const total = isBreak ? BREAK_LENGTH : FOCUS_LENGTH;
+    const frac = timerRemaining / total;
+    const ring = document.getElementById('ringProgress');
+    ring.style.strokeDasharray = RING_CIRCUMFERENCE;
+    ring.style.strokeDashoffset = RING_CIRCUMFERENCE * (1 - frac);
+    ring.classList.toggle('break', isBreak);
+  }
+
+  function timerTick(){
+    timerRemaining--;
+    if(timerRemaining <= 0){
+      if(timerPhase === 'focus'){
+        sessionsCompleted++;
+        timerPhase = 'break';
+        timerRemaining = BREAK_LENGTH;
+      }else{
+        timerPhase = 'focus';
+        timerRemaining = FOCUS_LENGTH;
+      }
+    }
+    updateTimerDisplay();
+  }
+
+  function startTimer(){
+    if(timerInterval) return;
+    timerInterval = setInterval(timerTick, 1000);
+    document.getElementById('timerStartBtn').textContent = 'Pause';
+  }
+
+  function pauseTimer(){
+    clearInterval(timerInterval);
+    timerInterval = null;
+    document.getElementById('timerStartBtn').textContent = 'Start';
+  }
+
+  function toggleTimer(){
+    if(timerInterval) pauseTimer(); else startTimer();
+  }
+
+  function resetTimer(){
+    pauseTimer();
+    timerPhase = 'focus';
+    timerRemaining = FOCUS_LENGTH;
+    updateTimerDisplay();
+  }
+
+  function skipPhase(){
+    pauseTimer();
+    if(timerPhase === 'focus'){
+      sessionsCompleted++;
+      timerPhase = 'break';
+      timerRemaining = BREAK_LENGTH;
+    }else{
+      timerPhase = 'focus';
+      timerRemaining = FOCUS_LENGTH;
+    }
+    updateTimerDisplay();
+  }
+
+  updateTimerDisplay();
+
+  /* ---- Riddles & Jokes ---- */
+  let currentRiddleAnswer = null;
+  let shownJokes = [];
+  let shownRiddles = [];
+  const JOKE_TOPICS = ['animals', 'school', 'food', 'computers', 'sports', 'space', 'music', 'weather', 'everyday objects', 'wordplay/puns'];
+
+  function skeletonBars(count){
+    const widths = ['92%', '78%', '60%'];
+    let html = '';
+    for(let i = 0; i < count; i++){
+      const isLast = i === count - 1;
+      html += `<div class="skeleton" style="width:${widths[i % widths.length]};${isLast ? '' : 'margin-bottom:8px;'}"></div>`;
+    }
+    return html;
+  }
+
+  async function generateContent(type){
+    const label = document.getElementById('riddleLabel');
+    const textEl = document.getElementById('riddleText');
+    const answerRow = document.getElementById('riddleAnswerRow');
+    const feedback = document.getElementById('riddleFeedback');
+
+    feedback.textContent = '';
+    feedback.className = 'riddle-feedback';
+    label.textContent = type === 'riddle' ? 'Riddle' : 'Joke';
+    textEl.innerHTML = skeletonBars(2);
+    answerRow.style.display = 'none';
+    currentRiddleAnswer = null;
+    document.getElementById('riddleSubmitBtn').disabled = false;
+
+    const topic = JOKE_TOPICS[Math.floor(Math.random() * JOKE_TOPICS.length)];
+    const avoidList = (type === 'riddle' ? shownRiddles : shownJokes).slice(-10).join(' | ');
+    const avoidClause = avoidList ? ` Do not repeat or closely resemble any of these already-used ones: ${avoidList}.` : '';
+
+    const prompt = type === 'riddle'
+      ? `Give me one original, fun riddle suitable for a teenager, themed around ${topic}, with a clear short answer (one word or a short phrase).${avoidClause} Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"riddle": "<riddle text>", "answer": "<short answer>"}`
+      : `Tell me one short, clean, funny joke suitable for a teenager, themed around ${topic}, split into a setup and a punchline.${avoidClause} Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"setup": "<setup text>", "punchline": "<punchline text>"}`;
+
+    try{
+      const text = await callGeminiText(prompt, 300);
+      const match = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : text);
+
+      if(type === 'riddle'){
+        textEl.textContent = parsed.riddle;
+        currentRiddleAnswer = (parsed.answer || '').trim();
+        document.getElementById('riddleAnswerInput').value = '';
+        answerRow.style.display = 'flex';
+        shownRiddles.push(parsed.riddle);
+        if(shownRiddles.length > 15) shownRiddles.shift();
+      }else{
+        textEl.innerHTML = '';
+        const setupEl = document.createElement('span');
+        setupEl.textContent = parsed.setup;
+        const punchlineEl = document.createElement('span');
+        punchlineEl.className = 'punchline';
+        textEl.appendChild(setupEl);
+        textEl.appendChild(punchlineEl);
+        setTimeout(() => {
+          punchlineEl.textContent = parsed.punchline;
+          punchlineEl.classList.add('shown');
+        }, 5000);
+        shownJokes.push(parsed.setup + ' / ' + parsed.punchline);
+        if(shownJokes.length > 15) shownJokes.shift();
+      }
+    }catch(e){
+      textEl.textContent = "Couldn't come up with one — try again.";
+    }
+  }
+
+  function checkRiddleAnswer(){
+    if(!currentRiddleAnswer) return;
+    const guess = document.getElementById('riddleAnswerInput').value.trim().toLowerCase();
+    const feedback = document.getElementById('riddleFeedback');
+    if(!guess) return;
+    const correct = currentRiddleAnswer.toLowerCase();
+    if(guess === correct || correct.includes(guess) || guess.includes(correct)){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      document.getElementById('riddleSubmitBtn').disabled = true;
+    }else{
+      feedback.textContent = 'Not quite — try again, or reveal the answer.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  function revealRiddleAnswer(){
+    if(!currentRiddleAnswer) return;
+    const feedback = document.getElementById('riddleFeedback');
+    feedback.textContent = 'Answer: ' + currentRiddleAnswer;
+    feedback.className = 'riddle-feedback revealed answered';
+    document.getElementById('riddleSubmitBtn').disabled = true;
+  }
+
+  document.getElementById('riddleAnswerInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter') checkRiddleAnswer();
+  });
+
+  function escapeHtml(s){
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderChat(){
+    const log = document.getElementById('chatlog');
+    log.innerHTML = '';
+    chatHistory.forEach((m, i) => {
+      const div = document.createElement('div');
+      const isNewest = i === chatHistory.length - 1;
+      div.className = 'msg ' + m.role + (isNewest ? ' msg-in' : '');
+
+      let actionsHtml = '';
+      if(m.role === 'user'){
+        actionsHtml = `<div class="msg-actions"><button class="msg-action-btn" onclick="startEditMessage(${i})">Edit</button></div>`;
+      }else if(m.role === 'assistant' && isNewest){
+        actionsHtml = `<div class="msg-actions"><button class="msg-action-btn" onclick="regenerateLastResponse()">Regenerate</button></div>`;
+      }
+
+      const imageHtml = m.image
+        ? `<img class="msg-image" src="data:${m.image.mimeType};base64,${m.image.data}" alt="Attached image">`
+        : (m.imageRemoved ? `<div class="msg-image-marker">📎 Image attached (not saved between sessions)</div>` : '');
+
+      const docHtml = m.document
+        ? `<div class="doc-card">
+            <div class="doc-card-icon">${m.document.type === 'docx' ? '📄' : '📕'}</div>
+            <div class="doc-card-info">
+              <div class="doc-card-title">${escapeHtml(m.document.title)}</div>
+              <div class="doc-card-type">${m.document.type === 'docx' ? 'Word Document' : 'PDF'}</div>
+            </div>
+            <button class="doc-card-btn" onclick="downloadGeneratedDocument(${i})">Download</button>
+          </div>`
+        : '';
+
+      div.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'AI'}</div><div class="body" id="msgBody${i}">${escapeHtml(m.content)}${imageHtml}${docHtml}</div>${actionsHtml}`;
+      log.appendChild(div);
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function sendChat(){
+    const input = document.getElementById('chatInput');
+    const text = input.value.trim();
+    if(!text && !pendingImage) return;
+    input.value = '';
+    input.style.height = 'auto';
+
+    const message = { role: 'user', content: text };
+    if(pendingImage){
+      message.image = { mimeType: pendingImage.mimeType, data: pendingImage.data };
+    }
+    chatHistory.push(message);
+    pendingImage = null;
+    renderImagePreview();
+    renderChat();
+    await generateAssistantReply();
+  }
+
+  // Shared by Send, Regenerate, and Edit — all three end with "now get a fresh
+  // reply for whatever chatHistory currently looks like."
+  async function generateAssistantReply(){
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true;
+    const log = document.getElementById('chatlog');
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'typing';
+    typingDiv.innerHTML = 'AI is thinking<span class="typing-dots"><span></span><span></span><span></span></span>';
+    log.appendChild(typingDiv);
+    log.scrollTop = log.scrollHeight;
+
+    let streamingBodyEl = null;
+    let displayedText = '';  // what's actually shown on screen right now
+    let targetText = '';     // everything received from the network so far — may run ahead of what's displayed
+    let streamEnded = false;
+    let revealTimer = null;
+
+    function ensureBubble(){
+      if(streamingBodyEl) return;
+      typingDiv.remove();
+      const streamingDiv = document.createElement('div');
+      streamingDiv.className = 'msg assistant msg-in';
+      streamingDiv.innerHTML = `<div class="who">AI</div><div class="body"></div>`;
+      log.appendChild(streamingDiv);
+      streamingBodyEl = streamingDiv.querySelector('.body');
+    }
+
+    // Reveals text at a steady pace regardless of how bursty the network chunks
+    // are — a big chunk just queues up and gets drained smoothly instead of
+    // appearing all at once. Speeds up automatically if a backlog builds up, so
+    // display never falls far behind what's actually already arrived.
+    function startRevealLoop(){
+      if(revealTimer) return;
+      revealTimer = setInterval(() => {
+        if(displayedText.length < targetText.length){
+          const backlog = targetText.length - displayedText.length;
+          const charsPerTick = backlog > 80 ? 8 : backlog > 24 ? 3 : 1;
+          displayedText = targetText.slice(0, Math.min(displayedText.length + charsPerTick, targetText.length));
+          ensureBubble();
+          streamingBodyEl.textContent = displayedText; // textContent, not innerHTML — safe by construction, no escaping needed
+          log.scrollTop = log.scrollHeight;
+        }else if(streamEnded){
+          clearInterval(revealTimer);
+          revealTimer = null;
+        }
+      }, 20);
+    }
+
+    try{
+      const basePrompt = buildChatSystemPrompt();
+      const promptWithMemory = userMemoryNotes
+        ? `${basePrompt}\n\nWhat you already know about this user from past conversations:\n${userMemoryNotes}`
+        : basePrompt;
+
+      const reply = await callGeminiChatStream(chatHistory, promptWithMemory, (partialText) => {
+        targetText = partialText;
+        ensureBubble();
+        startRevealLoop();
+      });
+      streamEnded = true;
+
+      const finalReply = reply || 'No response.';
+      const docMarker = parseDocumentMarker(finalReply);
+      if(docMarker){
+        const displayText = finalReply.replace(/\[\[DOCUMENT[\s\S]*?\[\/DOCUMENT\]\]/, '').trim()
+          || `Here's your ${docMarker.type === 'docx' ? 'Word document' : 'PDF'}: **${docMarker.title}**`;
+        chatHistory.push({ role: 'assistant', content: displayText, document: docMarker });
+      }else{
+        chatHistory.push({ role: 'assistant', content: finalReply });
+      }
+    }catch(e){
+      streamEnded = true;
+      chatHistory.push({ role: 'assistant', content: 'Something went wrong reaching the API.' });
+    }
+
+    // Let the reveal loop actually finish catching up before showing the final rendered message
+    await new Promise(resolve => {
+      const waitForCatchUp = setInterval(() => {
+        if(displayedText.length >= targetText.length){
+          clearInterval(waitForCatchUp);
+          resolve();
+        }
+      }, 20);
+    });
+
+    if(typingDiv.parentNode) typingDiv.remove();
+    renderChat(); // final render replaces the temporary streaming bubble and adds the Regenerate button
+    btn.disabled = false;
+    saveCurrentConversation();
+  }
+
+  async function regenerateLastResponse(){
+    if(chatHistory.length === 0 || chatHistory[chatHistory.length - 1].role !== 'assistant') return;
+    chatHistory.pop();
+    renderChat();
+    await generateAssistantReply();
+  }
+
+  function startEditMessage(index){
+    const bodyEl = document.getElementById('msgBody' + index);
+    if(!bodyEl) return;
+    const original = chatHistory[index].content;
+    bodyEl.innerHTML = `
+      <textarea class="msg-edit-input" id="editInput${index}">${escapeHtml(original)}</textarea>
+      <div class="msg-edit-actions">
+        <button onclick="submitEditMessage(${index})">Save &amp; Regenerate</button>
+        <button onclick="renderChat()">Cancel</button>
+      </div>
+    `;
+    const editInput = document.getElementById('editInput' + index);
+    editInput.focus();
+    editInput.setSelectionRange(editInput.value.length, editInput.value.length);
+  }
+
+  async function submitEditMessage(index){
+    const input = document.getElementById('editInput' + index);
+    const newText = input.value.trim();
+    if(!newText) return;
+    // Discard this message and everything that came after it, then continue fresh from the edit
+    chatHistory = chatHistory.slice(0, index);
+    chatHistory.push({ role: 'user', content: newText });
+    renderChat();
+    await generateAssistantReply();
+  }
+
+  /* ---- Snake ---- */
+  const SNAKE_SIZE = 18;
+  const SNAKE_COLS = 20;
+  let snake, snakeDir, snakeNextDir, snakeFood, snakeScore, snakeRunning, snakeInterval;
+
+  function initSnake(){
+    snake = [{x:9,y:10},{x:8,y:10},{x:7,y:10}];
+    snakeDir = {x:1,y:0};
+    snakeNextDir = {x:1,y:0};
+    snakeScore = 0;
+    snakeRunning = false;
+    spawnSnakeFood();
+    document.getElementById('snakeScore').textContent = '0';
+    document.getElementById('snakeScore').dataset.countVal = '0';
+    document.getElementById('snakeOverlay').style.display = 'flex';
+    document.getElementById('snakeOverlay').innerHTML = '<div class="game-overlay-text">Press any arrow key to start</div>';
+    drawSnake();
+  }
+
+  function spawnSnakeFood(){
+    let pos;
+    do{
+      pos = { x: Math.floor(Math.random()*SNAKE_COLS), y: Math.floor(Math.random()*SNAKE_COLS) };
+    }while(snake.some(s => s.x === pos.x && s.y === pos.y));
+    snakeFood = pos;
+  }
+
+  function drawSnake(){
+    const canvas = document.getElementById('snakeCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#16234F';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#6FE0A0';
+    ctx.fillRect(snakeFood.x*SNAKE_SIZE, snakeFood.y*SNAKE_SIZE, SNAKE_SIZE-2, SNAKE_SIZE-2);
+    snake.forEach((seg, i) => {
+      ctx.fillStyle = i === 0 ? '#F0CE85' : '#E0AC3F';
+      ctx.fillRect(seg.x*SNAKE_SIZE, seg.y*SNAKE_SIZE, SNAKE_SIZE-2, SNAKE_SIZE-2);
+    });
+  }
+
+  function snakeTick(){
+    const view = document.getElementById('view-snake');
+    if(!view.classList.contains('visible') || !snakeRunning) return;
+    snakeDir = snakeNextDir;
+    const head = { x: snake[0].x + snakeDir.x, y: snake[0].y + snakeDir.y };
+
+    if(head.x < 0 || head.x >= SNAKE_COLS || head.y < 0 || head.y >= SNAKE_COLS || snake.some(s => s.x === head.x && s.y === head.y)){
+      snakeRunning = false;
+      clearInterval(snakeInterval);
+      document.getElementById('snakeOverlay').style.display = 'flex';
+      document.getElementById('snakeOverlay').innerHTML = `<div class="game-overlay-text">Game Over — Score: ${snakeScore}</div><button class="timer-btn primary" onclick="initSnake()">Play Again</button>`;
+      return;
+    }
+
+    snake.unshift(head);
+    if(head.x === snakeFood.x && head.y === snakeFood.y){
+      snakeScore++;
+      animateNumber(document.getElementById('snakeScore'), snakeScore, { duration: 300 });
+      spawnSnakeFood();
+    }else{
+      snake.pop();
+    }
+    drawSnake();
+  }
+
+  document.addEventListener('keydown', e => {
+    const view = document.getElementById('view-snake');
+    if(!view || !view.classList.contains('visible')) return;
+    const dirs = {
+      ArrowUp: {x:0,y:-1}, ArrowDown: {x:0,y:1}, ArrowLeft: {x:-1,y:0}, ArrowRight: {x:1,y:0},
+      w: {x:0,y:-1}, s: {x:0,y:1}, a: {x:-1,y:0}, d: {x:1,y:0}
+    };
+    const d = dirs[e.key];
+    if(!d) return;
+    e.preventDefault();
+    if(d.x === -snakeDir.x && d.y === -snakeDir.y) return; // no reversing into self
+    snakeNextDir = d;
+    if(!snakeRunning){
+      snakeRunning = true;
+      document.getElementById('snakeOverlay').style.display = 'none';
+      clearInterval(snakeInterval);
+      snakeInterval = setInterval(snakeTick, 120);
+    }
+  });
+
+  initSnake();
+
+  /* ---- 2048 ---- */
+  let board2048, score2048;
+
+  function init2048(){
+    board2048 = Array.from({length:4}, () => Array(4).fill(0));
+    score2048 = 0;
+    document.getElementById('overlay2048').style.display = 'none';
+    document.getElementById('score2048').textContent = '0';
+    document.getElementById('score2048').dataset.countVal = '0';
+    spawn2048();
+    spawn2048();
+    render2048();
+  }
+
+  function spawn2048(){
+    const empty = [];
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++) if(board2048[r][c] === 0) empty.push([r,c]);
+    if(empty.length === 0) return;
+    const [r,c] = empty[Math.floor(Math.random()*empty.length)];
+    board2048[r][c] = Math.random() < 0.9 ? 2 : 4;
+  }
+
+  function render2048(){
+    const grid = document.getElementById('grid2048');
+    grid.innerHTML = '';
+    for(let r=0;r<4;r++){
+      for(let c=0;c<4;c++){
+        const v = board2048[r][c];
+        const tile = document.createElement('div');
+        tile.className = 'tile-2048';
+        if(v){ tile.setAttribute('data-v', v); tile.textContent = v; }
+        grid.appendChild(tile);
+      }
+    }
+    animateNumber(document.getElementById('score2048'), score2048, { duration: 300 });
+  }
+
+  function slideRow2048(row){
+    let vals = row.filter(v => v !== 0);
+    for(let i=0;i<vals.length-1;i++){
+      if(vals[i] === vals[i+1]){
+        vals[i] *= 2;
+        score2048 += vals[i];
+        vals.splice(i+1,1);
+      }
+    }
+    while(vals.length < 4) vals.push(0);
+    return vals;
+  }
+
+  function move2048(dir){
+    const before = JSON.stringify(board2048);
+    let b = board2048;
+    const rotate = g => g[0].map((_, c) => g.map(row => row[c]).reverse());
+
+    if(dir === 'left'){
+      b = b.map(row => slideRow2048(row));
+    }else if(dir === 'right'){
+      b = b.map(row => slideRow2048(row.slice().reverse()).reverse());
+    }else if(dir === 'up'){
+      let rot = rotate(rotate(rotate(b)));
+      rot = rot.map(row => slideRow2048(row));
+      b = rotate(rot);
+    }else if(dir === 'down'){
+      let rot = rotate(b);
+      rot = rot.map(row => slideRow2048(row));
+      b = rotate(rotate(rotate(rot)));
+    }
+
+    board2048 = b;
+    if(JSON.stringify(board2048) !== before){
+      spawn2048();
+    }
+    render2048();
+    check2048GameOver();
+  }
+
+  function check2048GameOver(){
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++){
+      if(board2048[r][c] === 0) return;
+      if(board2048[r][c] === 2048){
+        document.getElementById('overlay2048').style.display = 'flex';
+        document.getElementById('overlayText2048').textContent = 'You reached 2048!';
+        return;
+      }
+      if(c < 3 && board2048[r][c] === board2048[r][c+1]) return;
+      if(r < 3 && board2048[r][c] === board2048[r+1][c]) return;
+    }
+    document.getElementById('overlay2048').style.display = 'flex';
+    document.getElementById('overlayText2048').textContent = 'Game Over — Score: ' + score2048;
+  }
+
+  document.addEventListener('keydown', e => {
+    const view = document.getElementById('view-game2048');
+    if(!view || !view.classList.contains('visible')) return;
+    const map = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
+    if(map[e.key]){
+      e.preventDefault();
+      move2048(map[e.key]);
+    }
+  });
+
+  init2048();
+
+  /* ---- 15 Puzzle ---- */
+  let puzzle15, puzzleMoves;
+
+  function initPuzzle15(){
+    puzzle15 = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0];
+    puzzleMoves = 0;
+    // shuffle via random valid moves so it's always solvable
+    let blank = 15;
+    for(let i=0;i<300;i++){
+      const neighbors = puzzleNeighbors(blank);
+      const swap = neighbors[Math.floor(Math.random()*neighbors.length)];
+      [puzzle15[blank], puzzle15[swap]] = [puzzle15[swap], puzzle15[blank]];
+      blank = swap;
+    }
+    document.getElementById('overlayPuzzle15').style.display = 'none';
+    document.getElementById('movesPuzzle').textContent = '0';
+    document.getElementById('movesPuzzle').dataset.countVal = '0';
+    renderPuzzle15();
+  }
+
+  function puzzleNeighbors(i){
+    const r = Math.floor(i/4), c = i%4;
+    const out = [];
+    if(r > 0) out.push(i-4);
+    if(r < 3) out.push(i+4);
+    if(c > 0) out.push(i-1);
+    if(c < 3) out.push(i+1);
+    return out;
+  }
+
+  function renderPuzzle15(){
+    const grid = document.getElementById('gridPuzzle15');
+    grid.innerHTML = '';
+    puzzle15.forEach((val, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'tile-puzzle15' + (val === 0 ? ' empty' : '');
+      if(val !== 0){
+        tile.textContent = val;
+        tile.onclick = () => movePuzzle15(i);
+      }
+      grid.appendChild(tile);
+    });
+  }
+
+  function movePuzzle15(i){
+    const blank = puzzle15.indexOf(0);
+    if(puzzleNeighbors(i).includes(blank)){
+      [puzzle15[i], puzzle15[blank]] = [puzzle15[blank], puzzle15[i]];
+      puzzleMoves++;
+      animateNumber(document.getElementById('movesPuzzle'), puzzleMoves, { duration: 250 });
+      renderPuzzle15();
+      if(puzzle15.slice(0,15).every((v, idx) => v === idx+1) && puzzle15[15] === 0){
+        document.getElementById('overlayPuzzle15').style.display = 'flex';
+      }
+    }
+  }
+
+  initPuzzle15();
+
+  /* ---- Reaction Test ---- */
+  let reactionState = 'idle'; // idle, waiting, go
+  let reactionTimeout = null;
+  let reactionStart = 0;
+  let reactionBest = null;
+
+  async function loadReactionBest(){
+    try{
+      const res = await window.storage.get('reaction-best', false);
+      if(res && res.value){
+        reactionBest = parseInt(res.value);
+        animateNumber(document.getElementById('reactionBest'), reactionBest, { suffix: 'ms' });
+      }
+    }catch(e){}
+  }
+
+  function handleReactionClick(){
+    const box = document.getElementById('reactionBox');
+    const text = document.getElementById('reactionText');
+
+    if(reactionState === 'idle'){
+      reactionState = 'waiting';
+      box.className = 'reaction-box waiting';
+      text.textContent = 'Wait for green...';
+      const delay = 1000 + Math.random()*3000;
+      reactionTimeout = setTimeout(() => {
+        reactionState = 'go';
+        box.className = 'reaction-box go';
+        text.textContent = 'Click!';
+        reactionStart = Date.now();
+      }, delay);
+    }else if(reactionState === 'waiting'){
+      clearTimeout(reactionTimeout);
+      reactionState = 'idle';
+      box.className = 'reaction-box early';
+      text.textContent = 'Too soon! Click to try again';
+      setTimeout(() => { box.className = 'reaction-box'; }, 800);
+    }else if(reactionState === 'go'){
+      const time = Date.now() - reactionStart;
+      reactionState = 'idle';
+      box.className = 'reaction-box';
+      text.textContent = 'Click to try again';
+      document.getElementById('reactionLast').dataset.countVal = '0'; // fresh count-up each attempt
+      animateNumber(document.getElementById('reactionLast'), time, { suffix: 'ms' });
+      if(reactionBest === null || time < reactionBest){
+        reactionBest = time;
+        animateNumber(document.getElementById('reactionBest'), time, { suffix: 'ms' });
+        window.storage.set('reaction-best', String(time), false).catch(() => {});
+      }
+    }
+  }
+
+  loadReactionBest();
+
+  /* ---- Ambient Sounds (procedurally generated, no audio files/network needed) ---- */
+  const SOUND_CONFIGS = [
+    { id: 'white', label: 'White Noise', buffer: 'white' },
+    { id: 'rain', label: 'Rain', buffer: 'white', rainFilter: true },
+    { id: 'brown', label: 'Deep Rumble', buffer: 'brown' },
+    { id: 'pink', label: 'Soft Static', buffer: 'pink' }
+  ];
+
+  let audioCtx = null;
+  const noiseBuffers = {};
+  const soundNodes = {};
+  const soundVolumes = {};
+
+  function ensureAudioContext(){
+    if(!audioCtx){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if(audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function generateWhiteNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for(let i = 0; i < size; i++) data[i] = Math.random() * 2 - 1;
+    return buffer;
+  }
+
+  function generateBrownNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let last = 0;
+    for(let i = 0; i < size; i++){
+      const white = Math.random() * 2 - 1;
+      last = (last + 0.02 * white) / 1.02;
+      data[i] = last * 3.5;
+    }
+    return buffer;
+  }
+
+  function generatePinkNoiseBuffer(ctx, duration){
+    const size = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    for(let i = 0; i < size; i++){
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      const pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+      b6 = white * 0.115926;
+      data[i] = pink * 0.11;
+    }
+    return buffer;
+  }
+
+  function getNoiseBuffer(type){
+    if(!noiseBuffers[type]){
+      const ctx = ensureAudioContext();
+      if(type === 'white') noiseBuffers[type] = generateWhiteNoiseBuffer(ctx, 4);
+      else if(type === 'brown') noiseBuffers[type] = generateBrownNoiseBuffer(ctx, 4);
+      else if(type === 'pink') noiseBuffers[type] = generatePinkNoiseBuffer(ctx, 4);
+    }
+    return noiseBuffers[type];
+  }
+
+  function renderSoundGrid(){
+    const grid = document.getElementById('soundGrid');
+    grid.innerHTML = SOUND_CONFIGS.map(s => {
+      const vol = soundVolumes[s.id] !== undefined ? soundVolumes[s.id] : 50;
+      return `
+        <div class="sound-card" id="soundCard-${s.id}">
+          <div class="sound-card-top">
+            <div class="sound-card-title">${s.label}</div>
+            <div class="sound-toggle" id="soundToggle-${s.id}" onclick="toggleSound('${s.id}')">▶</div>
+          </div>
+          <input type="range" class="sound-volume" min="0" max="100" value="${vol}"
+                 oninput="setSoundVolume('${s.id}', this.value)">
+        </div>
+      `;
+    }).join('');
+  }
+
+  function toggleSound(id){
+    if(soundNodes[id]){
+      stopSound(id);
+    }else{
+      startSound(id);
+    }
+  }
+
+  function startSound(id){
+    const config = SOUND_CONFIGS.find(s => s.id === id);
+    const ctx = ensureAudioContext();
+    const buffer = getNoiseBuffer(config.buffer);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    let outputNode = source;
+    if(config.rainFilter){
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.value = 300;
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.value = 3200;
+      source.connect(highpass);
+      highpass.connect(lowpass);
+      outputNode = lowpass;
+    }
+
+    const gainNode = ctx.createGain();
+    const vol = soundVolumes[id] !== undefined ? soundVolumes[id] : 50;
+    gainNode.gain.value = (vol / 100) * 0.5;
+    outputNode.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    source.start();
+
+    soundNodes[id] = { source, gainNode };
+
+    const toggleBtn = document.getElementById('soundToggle-' + id);
+    const card = document.getElementById('soundCard-' + id);
+    if(toggleBtn){ toggleBtn.textContent = '❚❚'; toggleBtn.classList.add('playing'); }
+    if(card) card.classList.add('playing');
+  }
+
+  function stopSound(id){
+    const node = soundNodes[id];
+    if(node){
+      try{ node.source.stop(); }catch(e){}
+      node.source.disconnect();
+      node.gainNode.disconnect();
+    }
+    delete soundNodes[id];
+
+    const toggleBtn = document.getElementById('soundToggle-' + id);
+    const card = document.getElementById('soundCard-' + id);
+    if(toggleBtn){ toggleBtn.textContent = '▶'; toggleBtn.classList.remove('playing'); }
+    if(card) card.classList.remove('playing');
+  }
+
+  function setSoundVolume(id, value){
+    soundVolumes[id] = value;
+    if(soundNodes[id]) soundNodes[id].gainNode.gain.value = (value / 100) * 0.5;
+  }
+
+  renderSoundGrid();
+
+  /* ---- Tic-Tac-Toe ---- */
+  let tttBoard, tttOver, tttWins = 0, tttLosses = 0, tttDraws = 0;
+  let tttMode = 'unbeatable';
+
+  function setTttMode(mode){
+    tttMode = mode;
+    document.getElementById('tttModeUnbeatable').classList.toggle('active', mode === 'unbeatable');
+    document.getElementById('tttModeBeatable').classList.toggle('active', mode === 'beatable');
+    document.getElementById('tttSub').textContent = mode === 'unbeatable'
+      ? "You're X. The AI plays optimally — a draw is a good result."
+      : "You're X. The AI blocks the obvious stuff, but can't see far ahead — set up a fork and it's yours.";
+    tttWins = 0; tttLosses = 0; tttDraws = 0;
+    initTtt();
+  }
+
+  function initTtt(){
+    tttBoard = Array(9).fill(null);
+    tttOver = false;
+    document.getElementById('overlayTtt').style.display = 'none';
+    renderTtt();
+  }
+
+  function renderTtt(){
+    const grid = document.getElementById('gridTtt');
+    grid.innerHTML = '';
+    tttBoard.forEach((v, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'tile-ttt' + (v ? ' filled ' + v.toLowerCase() : '');
+      tile.textContent = v || '';
+      if(!v && !tttOver) tile.onclick = () => tttPlayerMove(i);
+      grid.appendChild(tile);
+    });
+    animateNumber(document.getElementById('tttWinsNum'), tttWins, { duration: 300 });
+    animateNumber(document.getElementById('tttLossesNum'), tttLosses, { duration: 300 });
+    animateNumber(document.getElementById('tttDrawsNum'), tttDraws, { duration: 300 });
+  }
+
+  const TTT_LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+
+  function tttWinner(board){
+    for(const [a,b,c] of TTT_LINES){
+      if(board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
+    }
+    if(board.every(v => v)) return 'draw';
+    return null;
+  }
+
+  function tttMinimax(board, isMax){
+    const winner = tttWinner(board);
+    if(winner === 'X') return -10;
+    if(winner === 'O') return 10;
+    if(winner === 'draw') return 0;
+
+    const scores = [];
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = isMax ? 'O' : 'X';
+        scores.push(tttMinimax(board, !isMax));
+        board[i] = null;
+      }
+    }
+    return isMax ? Math.max(...scores) : Math.min(...scores);
+  }
+
+  function tttBestMove(board){
+    let bestScore = -Infinity, bestMove = null;
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = 'O';
+        const score = tttMinimax(board, false);
+        board[i] = null;
+        if(score > bestScore){ bestScore = score; bestMove = i; }
+      }
+    }
+    return bestMove;
+  }
+
+  function tttRandomMove(board){
+    const empty = board.map((v,i) => v ? null : i).filter(v => v !== null);
+    return empty[Math.floor(Math.random() * empty.length)];
+  }
+
+  function tttFindImmediate(board, mark){
+    for(let i=0;i<9;i++){
+      if(!board[i]){
+        board[i] = mark;
+        const win = tttWinner(board) === mark;
+        board[i] = null;
+        if(win) return i;
+      }
+    }
+    return null;
+  }
+
+  function tttEasyMove(board){
+    // Notices the obvious: takes a winning move, or blocks an immediate threat —
+    // but doesn't look further ahead, so forks and long-term traps still get past it.
+    const winMove = tttFindImmediate(board, 'O');
+    if(winMove !== null) return winMove;
+    const blockMove = tttFindImmediate(board, 'X');
+    if(blockMove !== null) return blockMove;
+    return tttRandomMove(board);
+  }
+
+  function tttAiMove(board){
+    if(tttMode === 'unbeatable') return tttBestMove(board);
+    return tttEasyMove(board);
+  }
+
+  function tttPlayerMove(i){
+    if(tttBoard[i] || tttOver) return;
+    tttBoard[i] = 'X';
+    renderTtt();
+    const winner = tttWinner(tttBoard);
+    if(winner){ tttEnd(winner); return; }
+
+    setTimeout(() => {
+      const move = tttAiMove(tttBoard);
+      if(move !== null && move !== undefined) tttBoard[move] = 'O';
+      renderTtt();
+      const w2 = tttWinner(tttBoard);
+      if(w2) tttEnd(w2);
+    }, 350);
+  }
+
+  function tttEnd(winner){
+    tttOver = true;
+    let msg;
+    if(winner === 'draw'){ tttDraws++; msg = "It's a draw!"; }
+    else if(winner === 'X'){ tttWins++; msg = 'You win!'; }
+    else { tttLosses++; msg = 'AI wins!'; }
+    renderTtt();
+    document.getElementById('overlayTtt').style.display = 'flex';
+    document.getElementById('overlayTextTtt').textContent = msg;
+  }
+
+  document.getElementById('tttModeUnbeatable').classList.add('active');
+  initTtt();
+
+  /* ---- Word Chain ---- */
+  let wordChain = [];
+
+  function renderWordChain(){
+    const el = document.getElementById('chainDisplay');
+    animateNumber(document.getElementById('chainCountNum'), wordChain.length, { duration: 400 });
+    if(wordChain.length === 0){
+      el.innerHTML = '<div class="placeholder-note">Type a word below to start the chain.</div>';
+      return;
+    }
+    el.innerHTML = wordChain.map((w, i) => {
+      const tag = `<span class="chain-word ${i % 2 === 0 ? 'you' : 'claude'}">${escapeHtml(w)}</span>`;
+      return i === 0 ? tag : `<span class="chain-arrow">→</span>${tag}`;
+    }).join('');
+  }
+
+  function resetWordChain(){
+    wordChain = [];
+    document.getElementById('wordChainFeedback').textContent = '';
+    renderWordChain();
+  }
+
+  async function submitWordChain(){
+    const input = document.getElementById('wordChainInput');
+    const word = input.value.trim();
+    const feedback = document.getElementById('wordChainFeedback');
+    feedback.textContent = '';
+    if(!word) return;
+    if(word.includes(' ')){
+      feedback.textContent = 'One word at a time.';
+      return;
+    }
+    if(wordChain.some(w => w.toLowerCase() === word.toLowerCase())){
+      feedback.textContent = 'That word is already in the chain — try another.';
+      return;
+    }
+
+    wordChain.push(word);
+    input.value = '';
+    renderWordChain();
+
+    const btn = document.getElementById('wordChainBtn');
+    btn.disabled = true;
+    feedback.innerHTML = 'AI is thinking<span class="typing-dots"><span></span><span></span><span></span></span>';
+
+    try{
+      const usedList = wordChain.join(', ');
+      const prompt = `We're playing a word association chain game. The chain so far, in order, is: ${wordChain.join(' → ')}. Give ONE single word associated with the last word ("${word}") — a synonym, category, rhyme, common pairing, or related idea. It must not be any word already used in this chain: ${usedList}. Respond with ONLY that one word, no punctuation, no explanation.`;
+
+      const text = await callGeminiText(prompt, 20);
+      const claudeWord = text.trim().split(/\s+/)[0].replace(/[^a-zA-Z'-]/g, '');
+      if(claudeWord){
+        wordChain.push(claudeWord);
+        feedback.textContent = '';
+      }else{
+        feedback.textContent = "The AI couldn't come up with one — try adding another word.";
+      }
+    }catch(e){
+      feedback.textContent = "Something went wrong reaching the AI.";
+    }
+    renderWordChain();
+    btn.disabled = false;
+  }
+
+  /* ---- Excuse Generator ---- */
+  let excuseContext = '';
+  let excuseLevel = 1;
+
+  const GEMINI_PROXY_URL = 'https://gemini-proxy.25skshi.workers.dev';
+
+  async function callGeminiText(prompt, maxTokens){
+    const response = await fetch(GEMINI_PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.1-flash-lite",
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      })
+    });
+    const data = await response.json();
+    return (data.candidates && data.candidates[0] && data.candidates[0].content
+      ? data.candidates[0].content.parts[0].text
+      : '').trim();
+  }
+
+  // Shared by both the plain and streaming chat calls — builds Gemini's expected
+  // `contents` array, including inline image data on any message that has one.
+  function buildGeminiContents(history){
+    return history.map(m => {
+      const parts = [];
+      if(m.content) parts.push({ text: m.content });
+      if(m.image) parts.push({ inline_data: { mime_type: m.image.mimeType, data: m.image.data } });
+      if(parts.length === 0) parts.push({ text: '' }); // Gemini requires at least one part
+      return {
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts
+      };
+    });
+  }
+
+  async function callGeminiChat(history, systemPrompt){
+    const contents = buildGeminiContents(history);
+    const body = { model: "gemini-3.1-flash-lite", contents };
+    if(systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+
+    const response = await fetch(GEMINI_PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    return (data.candidates && data.candidates[0] && data.candidates[0].content
+      ? data.candidates[0].content.parts[0].text
+      : '').trim();
+  }
+
+  // Streaming version, used only by the live chat UI so replies appear as they're
+  // generated rather than all at once. onChunk is called with the accumulated text
+  // so far every time a new piece arrives — Gemini sends incremental deltas, not
+  // the full text each time, so this function does the accumulating itself.
+  async function callGeminiChatStream(history, systemPrompt, onChunk){
+    const contents = buildGeminiContents(history);
+    const body = { model: "gemini-3.1-flash-lite", contents, stream: true };
+    if(systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+
+    const response = await fetch(GEMINI_PROXY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    if(!response.body){
+      // Streaming unsupported in this environment — fall back to a single read
+      const data = await response.json();
+      const fullText = (data.candidates && data.candidates[0] && data.candidates[0].content
+        ? data.candidates[0].content.parts[0].text
+        : '').trim();
+      if(fullText) onChunk(fullText);
+      return fullText;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // an incomplete trailing line waits for the next chunk
+
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        const jsonStr = line.slice(6).trim();
+        if(!jsonStr) continue;
+        try{
+          const parsed = JSON.parse(jsonStr);
+          const piece = parsed.candidates && parsed.candidates[0] && parsed.candidates[0].content
+            && parsed.candidates[0].content.parts && parsed.candidates[0].content.parts[0]
+            ? parsed.candidates[0].content.parts[0].text
+            : '';
+          if(piece){
+            fullText += piece;
+            onChunk(fullText);
+          }
+        }catch(e){ /* an incomplete or non-JSON SSE line — safe to skip */ }
+      }
+    }
+    return fullText.trim();
+  }
+
+  // Kept as a thin alias so every existing call site (Excuse Generator, Which X, Vocab) keeps working unchanged
+  async function callClaudeText(prompt, maxTokens){
+    return callGeminiText(prompt, maxTokens);
+  }
+
+  async function generateExcuse(){
+    const input = document.getElementById('excuseInput');
+    excuseContext = input.value.trim() || 'being late';
+    excuseLevel = 1;
+    await runExcuse();
+  }
+
+  async function escalateExcuse(){
+    excuseLevel++;
+    await runExcuse();
+  }
+
+  async function runExcuse(){
+    const label = document.getElementById('excuseLabel');
+    const textEl = document.getElementById('excuseText');
+    const moreBtn = document.getElementById('excuseMoreBtn');
+    label.textContent = 'Excuse for: ' + excuseContext;
+    textEl.innerHTML = skeletonBars(2);
+    moreBtn.style.display = 'none';
+
+    const escalationClause = excuseLevel > 1
+      ? ` Make it noticeably MORE absurd and over-the-top than a normal excuse — escalation level ${excuseLevel} out of increasingly ridiculous.`
+      : '';
+    const prompt = `Give me one short, funny, creative excuse for "${excuseContext}".${escalationClause} Respond with ONLY the excuse itself, 1-2 sentences, no preamble, no quotes.`;
+
+    try{
+      const text = await callClaudeText(prompt, 150);
+      textEl.textContent = text || "Couldn't think of one — try again.";
+      moreBtn.style.display = 'inline-block';
+      const levelDisplay = document.getElementById('excuseLevelDisplay');
+      levelDisplay.style.display = 'block';
+      animateNumber(document.getElementById('excuseLevelNum'), excuseLevel, { duration: 400 });
+    }catch(e){
+      textEl.textContent = "Something went wrong — try again.";
+    }
+  }
+
+  document.getElementById('excuseInput').addEventListener('keydown', e => {
+    if(e.key === 'Enter') generateExcuse();
+  });
+
+  /* ---- Which X Are You? ---- */
+  let whichxTopic = '';
+  let whichxQuestions = [];
+  let whichxAnswers = [];
+  let whichxCurrent = 0;
+
+  async function startWhichX(){
+    whichxTopic = document.getElementById('whichxTopic').value.trim();
+    if(!whichxTopic) return;
+
+    document.getElementById('whichxSetup').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'none';
+    const quizArea = document.getElementById('whichxQuizArea');
+    quizArea.style.display = 'block';
+    document.getElementById('whichxQuestionCard').innerHTML = '<div class="riddle-text">Building your quiz...</div>';
+
+    const prompt = `Create a fun "Which ${whichxTopic} are you" personality quiz with exactly 5 multiple choice questions, each with exactly 4 short answer options. Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"questions":[{"question":"<text>","options":["<a>","<b>","<c>","<d>"]}]}`;
+
+    try{
+      const text = await callClaudeText(prompt, 900);
+      const match = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      whichxQuestions = parsed.questions || [];
+      whichxAnswers = [];
+      whichxCurrent = 0;
+      renderWhichXQuestion();
+    }catch(e){
+      document.getElementById('whichxQuestionCard').innerHTML = '<div class="riddle-text">Something went wrong building the quiz — try again.</div>';
+    }
+  }
+
+  function renderWhichXQuestion(){
+    const card = document.getElementById('whichxQuestionCard');
+    const q = whichxQuestions[whichxCurrent];
+    if(!q){ finishWhichX(); return; }
+    card.innerHTML = `
+      <div class="riddle-label">Question <span id="whichxQNum">0</span> of ${whichxQuestions.length}</div>
+      <div class="riddle-text">${escapeHtml(q.question)}</div>
+      <div class="upgrade-grid">
+        ${q.options.map((opt, i) => `<button class="timer-btn" style="width:100%;text-align:left;" onclick="answerWhichX(${i})">${escapeHtml(opt)}</button>`).join('')}
+      </div>
+    `;
+    animateNumber(document.getElementById('whichxQNum'), whichxCurrent + 1, { duration: 350 });
+  }
+
+  function answerWhichX(i){
+    whichxAnswers.push(whichxQuestions[whichxCurrent].options[i]);
+    whichxCurrent++;
+    renderWhichXQuestion();
+  }
+
+  async function finishWhichX(){
+    document.getElementById('whichxQuizArea').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'block';
+    document.getElementById('whichxResultTitle').textContent = 'Judging your result...';
+    document.getElementById('whichxResultDesc').textContent = '';
+
+    const pairs = whichxQuestions.map((q, i) => `${q.question} → ${whichxAnswers[i]}`).join(' | ');
+    const prompt = `Someone took a "Which ${whichxTopic} are you" quiz. Their question and answer pairs: ${pairs}. Based on these answers, decide which specific ${whichxTopic} they are most like, with a fun one-to-two sentence justification. Respond with ONLY a raw JSON object, no markdown fences, no explanation, in exactly this shape: {"result":"<name>","description":"<justification>"}`;
+
+    try{
+      const text = await callClaudeText(prompt, 300);
+      const match = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      document.getElementById('whichxResultTitle').textContent = parsed.result || 'Unknown';
+      document.getElementById('whichxResultDesc').textContent = parsed.description || '';
+    }catch(e){
+      document.getElementById('whichxResultTitle').textContent = "Couldn't judge that one";
+      document.getElementById('whichxResultDesc').textContent = 'Try again in a moment.';
+    }
+  }
+
+  function resetWhichX(){
+    document.getElementById('whichxSetup').style.display = 'block';
+    document.getElementById('whichxQuizArea').style.display = 'none';
+    document.getElementById('whichxResultArea').style.display = 'none';
+    document.getElementById('whichxTopic').value = '';
+  }
+
+  /* ---- Decision Wheel ---- */
+  let wheelOptions = ['Option A', 'Option B', 'Option C'];
+  let wheelRotation = 0;
+  let wheelSpinning = false;
+  const WHEEL_COLORS = ['#E0AC3F', '#16234F', '#6FE0A0', '#8a6a2a', '#2A3A70', '#F0CE85'];
+
+  function renderWheelOptions(){
+    const list = document.getElementById('wheelOptionList');
+    list.innerHTML = '';
+    wheelOptions.forEach((opt, i) => {
+      const li = document.createElement('li');
+      li.className = 'task-item';
+      li.innerHTML = `<div class="task-text">${escapeHtml(opt)}</div><div class="task-del" onclick="removeWheelOption(${i})">&times;</div>`;
+      list.appendChild(li);
+    });
+    renderWheel();
+  }
+
+  function addWheelOption(){
+    const input = document.getElementById('wheelOptionInput');
+    const val = input.value.trim();
+    if(!val) return;
+    wheelOptions.push(val);
+    input.value = '';
+    renderWheelOptions();
+  }
+
+  function removeWheelOption(i){
+    if(wheelOptions.length <= 2) return;
+    wheelOptions.splice(i, 1);
+    renderWheelOptions();
+  }
+
+  function renderWheel(){
+    const wheel = document.getElementById('wheel');
+    const n = wheelOptions.length;
+    const segAngle = 360 / n;
+    const gradientParts = wheelOptions.map((opt, i) =>
+      `${WHEEL_COLORS[i % WHEEL_COLORS.length]} ${i*segAngle}deg ${(i+1)*segAngle}deg`
+    ).join(', ');
+    wheel.style.background = `conic-gradient(${gradientParts})`;
+
+    wheel.innerHTML = '';
+    wheelOptions.forEach((opt, i) => {
+      const mid = i*segAngle + segAngle/2;
+      const label = document.createElement('div');
+      label.className = 'wheel-label';
+      label.textContent = opt;
+      label.style.transform = `rotate(${mid}deg) translate(50px)`;
+      wheel.appendChild(label);
+    });
+  }
+
+  function spinWheel(){
+    if(wheelSpinning || wheelOptions.length < 2) return;
+    wheelSpinning = true;
+    document.getElementById('wheelResult').textContent = '';
+    const n = wheelOptions.length;
+    const segAngle = 360 / n;
+    const extraSpins = 5 + Math.floor(Math.random()*3);
+    const randomOffset = Math.random() * 360;
+    wheelRotation += extraSpins*360 + randomOffset;
+
+    const wheel = document.getElementById('wheel');
+    wheel.style.transform = `rotate(${wheelRotation}deg)`;
+
+    setTimeout(() => {
+      wheelSpinning = false;
+      const normalized = ((360 - (wheelRotation % 360)) % 360);
+      const index = Math.floor(normalized / segAngle) % n;
+      document.getElementById('wheelResult').textContent = 'Result: ' + wheelOptions[index];
+    }, 4100);
+  }
+
+  renderWheelOptions();
+
+  /* ---- Password Generator ---- */
+  function generatePassword(){
+    const length = parseInt(document.getElementById('passwordLength').value);
+    const useUpper = document.getElementById('passUpper').checked;
+    const useLower = document.getElementById('passLower').checked;
+    const useNumbers = document.getElementById('passNumbers').checked;
+    const useSymbols = document.getElementById('passSymbols').checked;
+
+    const sets = {
+      upper: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+      lower: 'abcdefghijklmnopqrstuvwxyz',
+      numbers: '0123456789',
+      symbols: '!@#$%^&*()-_=+[]{}'
+    };
+
+    let charset = '';
+    if(useUpper) charset += sets.upper;
+    if(useLower) charset += sets.lower;
+    if(useNumbers) charset += sets.numbers;
+    if(useSymbols) charset += sets.symbols;
+
+    const feedback = document.getElementById('passwordFeedback');
+    if(!charset){
+      feedback.textContent = 'Pick at least one character type.';
+      return;
+    }
+    feedback.textContent = '';
+
+    const randomValues = new Uint32Array(length);
+    crypto.getRandomValues(randomValues);
+    let result = '';
+    for(let i = 0; i < length; i++){
+      result += charset[randomValues[i] % charset.length];
+    }
+    document.getElementById('passwordOutput').textContent = result;
+  }
+
+  function copyPassword(){
+    const text = document.getElementById('passwordOutput').textContent;
+    const feedback = document.getElementById('passwordFeedback');
+    if(!text || text === 'Click Generate below'){
+      feedback.textContent = 'Generate a password first.';
+      return;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      feedback.textContent = 'Copied to clipboard.';
+      setTimeout(() => { feedback.textContent = ''; }, 2000);
+    }).catch(() => {
+      feedback.textContent = "Couldn't copy — select and copy manually.";
+    });
+  }
+
+  /* ---- Word Counter ---- */
+  function updateCounter(){
+    const text = document.getElementById('counterInput').value;
+    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    const chars = text.length;
+    const charsNoSpace = text.replace(/\s/g, '').length;
+    const sentences = (text.match(/[.!?]+/g) || []).length;
+    const readSeconds = Math.round((words / 200) * 60); // ~200 wpm average reading speed
+
+    animateNumber(document.getElementById('counterWords'), words, { duration: 250 });
+    animateNumber(document.getElementById('counterChars'), chars, { duration: 250 });
+    animateNumber(document.getElementById('counterCharsNoSpace'), charsNoSpace, { duration: 250 });
+    animateNumber(document.getElementById('counterSentences'), sentences, { duration: 250 });
+    document.getElementById('counterReadTime').textContent = readSeconds < 60
+      ? readSeconds + 's'
+      : Math.floor(readSeconds / 60) + 'm ' + (readSeconds % 60) + 's';
+  }
+
+  /* ---- Countdown Timer ---- */
+  let countdowns = [];
+
+  async function loadCountdowns(){
+    try{
+      const res = await window.storage.get('countdowns', false);
+      countdowns = res && res.value ? JSON.parse(res.value) : [];
+    }catch(e){ countdowns = []; }
+    renderCountdowns();
+    updateNavPin();
+  }
+
+  async function saveCountdowns(){
+    try{ await window.storage.set('countdowns', JSON.stringify(countdowns), false); }catch(e){}
+  }
+
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  function populateCountdownInputs(){
+    const daySelect = document.getElementById('countdownDay');
+    const monthSelect = document.getElementById('countdownMonth');
+    if(!daySelect || !monthSelect) return;
+    daySelect.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i+1}">${i+1}</option>`).join('');
+    monthSelect.innerHTML = MONTH_NAMES.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+  }
+
+  function addCountdown(){
+    const labelInput = document.getElementById('countdownLabel');
+    const day = document.getElementById('countdownDay').value;
+    const month = document.getElementById('countdownMonth').value;
+    const year = document.getElementById('countdownYear').value;
+    const label = labelInput.value.trim();
+    if(!label || !day || !month || !year) return;
+
+    const date = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    countdowns.push({ label, date, pinned: false });
+    labelInput.value = '';
+    document.getElementById('countdownYear').value = '';
+    saveCountdowns();
+    renderCountdowns();
+  }
+
+  function removeCountdown(i){
+    countdowns.splice(i, 1);
+    saveCountdowns();
+    renderCountdowns();
+    updateNavPin();
+  }
+
+  function togglePinCountdown(i){
+    const wasPinned = countdowns[i].pinned;
+    countdowns.forEach(c => { c.pinned = false; }); // only one pin at a time
+    countdowns[i].pinned = !wasPinned;
+    saveCountdowns();
+    renderCountdowns();
+    updateNavPin();
+  }
+
+  function formatDateDDMMYYYY(dateStr){
+    const d = new Date(dateStr + 'T00:00:00');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    return `${dd}/${mm}/${d.getFullYear()}`;
+  }
+
+  function formatCountdownDiff(diff){
+    if(diff <= 0) return 'Today!';
+    const days = Math.floor(diff / 86400000);
+    const hours = Math.floor((diff / 3600000) % 24);
+    const minutes = Math.floor((diff / 60000) % 60);
+    const seconds = Math.floor((diff / 1000) % 60);
+    return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+  }
+
+  function renderCountdowns(){
+    const grid = document.getElementById('countdownGrid');
+    if(!grid) return;
+    if(countdowns.length === 0){
+      grid.innerHTML = '<div class="placeholder-note">No countdowns yet — add one above.</div>';
+      return;
+    }
+    grid.innerHTML = countdowns.map((c, i) => `
+      <div class="sound-card">
+        <div class="sound-card-top">
+          <div class="sound-card-title">${escapeHtml(c.label)}</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div class="task-del" onclick="togglePinCountdown(${i})" title="${c.pinned ? 'Unpin' : 'Pin to header'}" style="color:${c.pinned ? 'var(--accent-blue)' : 'var(--slate-dim)'};font-size:15px;">📌</div>
+            <div class="task-del" onclick="removeCountdown(${i})">&times;</div>
+          </div>
+        </div>
+        <div class="cs-value" id="countdownVal-${i}" style="font-size:18px;">--</div>
+        <div class="cs-label" style="margin-top:6px;">${formatDateDDMMYYYY(c.date)}</div>
+      </div>
+    `).join('');
+    updateCountdownValues();
+  }
+
+  function updateCountdownValues(){
+    const view = document.getElementById('view-countdown');
+    if(!view || !view.classList.contains('visible')) return;
+    countdowns.forEach((c, i) => {
+      const el = document.getElementById('countdownVal-' + i);
+      if(!el) return;
+      const diff = new Date(c.date + 'T00:00:00') - new Date();
+      el.textContent = formatCountdownDiff(diff);
+    });
+  }
+
+  function updateNavPin(){
+    const badge = document.getElementById('navPinBadge');
+    if(!badge) return;
+    const pinned = countdowns.find(c => c.pinned);
+    if(!pinned){
+      badge.style.display = 'none';
+      return;
+    }
+    badge.style.display = 'inline-flex';
+    const diff = new Date(pinned.date + 'T00:00:00') - new Date();
+    badge.innerHTML = `📌 ${escapeHtml(pinned.label)}: ${formatCountdownDiff(diff)}`;
+  }
+
+  setInterval(() => {
+    updateCountdownValues();
+    updateNavPin();
+  }, 1000);
+  populateCountdownInputs();
+  loadCountdowns();
+
+  /* ---- QR Code Generator ---- */
+  function updateQR(){
+    const text = document.getElementById('qrInput').value.trim();
+    const img = document.getElementById('qrImage');
+    const placeholder = document.getElementById('qrPlaceholder');
+    if(!text){
+      img.style.display = 'none';
+      placeholder.style.display = 'block';
+      return;
+    }
+    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(text)}`;
+    img.style.display = 'block';
+    placeholder.style.display = 'none';
+  }
+
+  /* ---- Time Capsule ---- */
+  const CAPSULE_MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  function populateCapsuleInputs(){
+    const daySelect = document.getElementById('capsuleDay');
+    const monthSelect = document.getElementById('capsuleMonth');
+    if(!daySelect || !monthSelect) return;
+    daySelect.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i+1}">${i+1}</option>`).join('');
+    monthSelect.innerHTML = CAPSULE_MONTH_NAMES.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+  }
+  populateCapsuleInputs();
+
+  async function sealTimeCapsule(){
+    const email = document.getElementById('capsuleEmail').value.trim();
+    const message = document.getElementById('capsuleMessage').value.trim();
+    const day = document.getElementById('capsuleDay').value;
+    const month = document.getElementById('capsuleMonth').value;
+    const year = document.getElementById('capsuleYear').value;
+    const feedback = document.getElementById('capsuleFeedback');
+    const btn = document.getElementById('capsuleSendBtn');
+
+    feedback.textContent = '';
+    feedback.className = 'riddle-feedback';
+
+    if(!email || !message || !day || !month || !year){
+      feedback.textContent = 'Fill in the email, message, and a full date first.';
+      feedback.className = 'riddle-feedback incorrect';
+      return;
+    }
+
+    btn.disabled = true;
+    feedback.textContent = 'Sealing...';
+
+    try{
+      const response = await fetch('/__create_time_capsule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, message, day, month, year })
+      });
+      const data = await response.json();
+      if(data.ok){
+        feedback.textContent = 'Sealed — this will be emailed on the date you chose.';
+        feedback.className = 'riddle-feedback correct answered';
+        document.getElementById('capsuleEmail').value = '';
+        document.getElementById('capsuleMessage').value = '';
+        document.getElementById('capsuleYear').value = '';
+      }else{
+        feedback.textContent = data.error || "Couldn't seal it — try again.";
+        feedback.className = 'riddle-feedback incorrect';
+      }
+    }catch(e){
+      feedback.textContent = 'Something went wrong sealing the capsule.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+    btn.disabled = false;
+  }
+
+  /* ---- Multiplayer Hub: Live Chat + Direct Messages (share one connection) ---- */
+  let liveChatSocket = null;
+  let onlineUsers = [];
+  let dmConversations = {}; // { username: [{from, text, timestamp, status?}, ...] }
+  let activeDmPartner = null;
+  let liveChatTypingUsers = new Set();
+  let dmTypingFrom = null;
+  let myLiveChatTypingTimeout = null;
+  let myDmTypingTimeout = null;
+
+  function getChatDisplayName(){
+    return window.__GUEST_USERNAME__ || 'Shaurya';
+  }
+
+  function ensureChatConnection(){
+    if(!liveChatSocket || liveChatSocket.readyState === WebSocket.CLOSED){
+      connectLiveChat();
+    }
+  }
+
+  function openLiveChat(){
+    switchView('livechat');
+    ensureChatConnection();
+  }
+
+  function openDirectMessages(){
+    switchView('directmessages');
+    ensureChatConnection();
+    renderDMContactList();
+  }
+
+  function connectLiveChat(){
+    const myName = getChatDisplayName();
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/__chat_ws?username=' + encodeURIComponent(myName);
+
+    setChatStatus('Connecting...');
+    liveChatSocket = new WebSocket(wsUrl);
+
+    liveChatSocket.addEventListener('open', () => {
+      setChatStatus('Connected — live');
+    });
+
+    liveChatSocket.addEventListener('message', async (event) => {
+      let data;
+      try{ data = JSON.parse(event.data); }catch(e){ return; }
+
+      if(data.type === 'chat'){
+        appendLiveChatMessage(data.username, data.text, data.username === myName);
+      }else if(data.type === 'system'){
+        appendLiveChatSystemMessage(data.text);
+      }else if(data.type === 'presence'){
+        const countEl = document.getElementById('chatOnlineCount');
+        if(countEl) countEl.textContent = data.count;
+        if(Array.isArray(data.users)){
+          onlineUsers = data.users;
+          renderDMContactList();
+        }
+      }else if(data.type === 'dm'){
+        const partner = data.from === myName ? data.to : data.from;
+
+        let text = '[Could not decrypt this message]';
+        try{
+          const sharedKey = await getDmSharedKey(partner);
+          if(sharedKey){
+            text = await decryptDmText(data.ciphertext, data.iv, sharedKey);
+          }
+        }catch(e){ /* text already has a clear fallback message */ }
+
+        if(!dmConversations[partner]) dmConversations[partner] = [];
+        dmConversations[partner].push({
+          from: data.from,
+          text: text,
+          timestamp: data.timestamp,
+          status: data.from === myName ? 'sent' : undefined
+        });
+        if(data.from === dmTypingFrom) { dmTypingFrom = null; updateDmTypingIndicator(); }
+
+        if(partner === activeDmPartner){
+          renderDMConversation();
+          if(data.from !== myName) markDmConversationRead(partner);
+        }else if(data.from !== myName){
+          notifyNewDM(data.from, text);
+        }
+      }else if(data.type === 'dm_read'){
+        const partner = data.from;
+        if(dmConversations[partner]){
+          dmConversations[partner].forEach(m => { if(m.from === myName) m.status = 'read'; });
+          if(partner === activeDmPartner) renderDMConversation();
+        }
+      }else if(data.type === 'typing'){
+        if(data.context === 'dm'){
+          if(data.from === activeDmPartner){ dmTypingFrom = data.from; updateDmTypingIndicator(); }
+        }else{
+          liveChatTypingUsers.add(data.from);
+          updateLiveChatTypingIndicator();
+        }
+      }else if(data.type === 'stopped_typing'){
+        if(data.context === 'dm'){
+          if(data.from === dmTypingFrom){ dmTypingFrom = null; updateDmTypingIndicator(); }
+        }else{
+          liveChatTypingUsers.delete(data.from);
+          updateLiveChatTypingIndicator();
+        }
+      }else if(data.type === 'ttt_state'){
+        renderLiveTtt(data.state);
+      }else if(data.type === 'connect4_state'){
+        renderLiveConnect4(data.state);
+      }else if(data.type === 'wordchain_state'){
+        renderLiveWordChain(data.state);
+      }else if(data.type === 'cursor_move'){
+        renderRemoteCursor(data.from, data.x, data.y, data.page);
+      }else if(data.type === 'whiteboard_draw'){
+        if(window._whiteboardDrawLine) window._whiteboardDrawLine(data.stroke.x1, data.stroke.y1, data.stroke.x2, data.stroke.y2);
+      }else if(data.type === 'whiteboard_clear'){
+        const wbCanvas = document.getElementById('whiteboardCanvas');
+        if(wbCanvas) wbCanvas.getContext('2d').clearRect(0, 0, wbCanvas.width, wbCanvas.height);
+      }else if(data.type === 'voice_call_request'){
+        showIncomingCallBanner(data.from);
+      }else if(data.type === 'voice_offer'){
+        pendingVoiceOffer = { from: data.from, sdp: data.sdp };
+      }else if(data.type === 'voice_answer'){
+        if(voiceCallState && voiceCallState.pc){
+          voiceCallState.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+            .then(() => updateVoiceCallUI('active', voiceCallState.partner))
+            .catch(() => {});
+        }
+      }else if(data.type === 'voice_ice_candidate'){
+        if(voiceCallState && voiceCallState.pc && data.candidate){
+          voiceCallState.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+        }
+      }else if(data.type === 'voice_call_end'){
+        hideIncomingCallBanner();
+        pendingVoiceOffer = null;
+        endVoiceCall(false);
+      }else if(data.type === 'voice_reaction'){
+        if(voiceCallState && data.from === voiceCallState.partner){
+          showFloatingReaction(data.emoji);
+        }
+      }
+    });
+
+    liveChatSocket.addEventListener('close', () => {
+      setChatStatus('Disconnected — reconnecting...');
+      setTimeout(() => {
+        const liveView = document.getElementById('view-livechat');
+        const dmView = document.getElementById('view-directmessages');
+        const stillNeeded = (liveView && liveView.classList.contains('visible')) || (dmView && dmView.classList.contains('visible'));
+        if(stillNeeded) connectLiveChat();
+      }, 3000);
+    });
+
+    liveChatSocket.addEventListener('error', () => {
+      if(liveChatSocket) liveChatSocket.close();
+    });
+  }
+
+  function setChatStatus(text){
+    const liveStatusEl = document.getElementById('chatConnectionStatus');
+    const dmStatusEl = document.getElementById('dmConnectionStatus');
+    if(liveStatusEl) liveStatusEl.textContent = text;
+    if(dmStatusEl) dmStatusEl.textContent = text;
+  }
+
+  function appendLiveChatMessage(username, text, isMe){
+    const log = document.getElementById('livechatLog');
+    if(!log) return;
+    const div = document.createElement('div');
+    div.className = 'msg ' + (isMe ? 'user' : 'assistant') + ' msg-in';
+    div.innerHTML = `<div class="who">${escapeHtml(username)}</div><div class="body">${escapeHtml(text)}</div>`;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function appendLiveChatSystemMessage(text){
+    const log = document.getElementById('livechatLog');
+    if(!log) return;
+    const div = document.createElement('div');
+    div.style.cssText = "text-align:center;color:var(--slate-dim);font-size:12px;font-family:'IBM Plex Mono',monospace;margin-bottom:10px;";
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function sendLiveChatMessage(){
+    const input = document.getElementById('livechatInput');
+    const text = input.value.trim();
+    if(!text || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'chat', text }));
+    input.value = '';
+    clearTimeout(myLiveChatTypingTimeout);
+    liveChatSocket.send(JSON.stringify({ type: 'stopped_typing' }));
+  }
+
+  function handleLiveChatTyping(){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'typing' }));
+    clearTimeout(myLiveChatTypingTimeout);
+    myLiveChatTypingTimeout = setTimeout(() => {
+      liveChatSocket.send(JSON.stringify({ type: 'stopped_typing' }));
+    }, 2000);
+  }
+
+  function updateLiveChatTypingIndicator(){
+    const el = document.getElementById('liveChatTypingIndicator');
+    if(!el) return;
+    const names = Array.from(liveChatTypingUsers);
+    if(names.length === 0){ el.textContent = ''; return; }
+    el.textContent = names.join(', ') + (names.length === 1 ? ' is typing...' : ' are typing...');
+  }
+
+  /* ---- Direct Messages ---- */
+  function renderDMContactList(){
+    const container = document.getElementById('dmContactList');
+    if(!container) return;
+    const myName = getChatDisplayName();
+    const others = onlineUsers.filter(u => u !== myName);
+
+    if(others.length === 0){
+      container.innerHTML = '<div class="placeholder-note" style="font-size:12px;padding:12px;">No one else online right now.</div>';
+      return;
+    }
+
+    container.innerHTML = others.map(u => `
+      <div onclick="selectDmPartner('${escapeHtml(u)}')" style="cursor:pointer;padding:9px 12px;border-radius:6px;margin-bottom:6px;
+        background:${u === activeDmPartner ? 'var(--panel-raised)' : 'var(--panel)'};border:1px solid ${u === activeDmPartner ? 'var(--accent-pink)' : 'var(--line)'};
+        font-size:13px;color:#F5F1E8;transition:border-color .2s ease;">
+        ${escapeHtml(u)}
+      </div>
+    `).join('');
+  }
+
+  function selectDmPartner(username){
+    activeDmPartner = username;
+    dmTypingFrom = null;
+    document.getElementById('dmConversationHeader').textContent = 'Conversation with ' + username;
+    renderDMContactList();
+    renderDMConversation();
+    updateDmTypingIndicator();
+    markDmConversationRead(username);
+    const callBtn = document.getElementById('voiceCallBtn');
+    if(callBtn) callBtn.style.display = voiceCallState ? 'none' : 'inline-block';
+  }
+
+  function renderDMConversation(){
+    const log = document.getElementById('dmConversationLog');
+    if(!log || !activeDmPartner) return;
+    const myName = getChatDisplayName();
+    const messages = dmConversations[activeDmPartner] || [];
+    log.innerHTML = messages.map(m => {
+      const isMe = m.from === myName;
+      const statusMark = isMe
+        ? (m.status === 'read'
+            ? ` <span style="color:var(--accent-pink);font-weight:600;">&#10003;&#10003;</span>`
+            : ` <span style="color:var(--slate-dim);">&#10003;</span>`)
+        : '';
+      return `
+        <div class="msg ${isMe ? 'user' : 'assistant'}">
+          <div class="who">${escapeHtml(m.from)}</div><div class="body">${escapeHtml(m.text)}${statusMark}</div>
+        </div>
+      `;
+    }).join('');
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function markDmConversationRead(username){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'dm_read', to: username }));
+  }
+
+  /* ---- End-to-end encryption for Direct Messages ---- */
+  // Real ECDH + AES-256-GCM via the browser's own Web Crypto API. The private
+  // key is generated once per device and never leaves it — it's stored only in
+  // this browser's localStorage, never sent to the server. That's what makes
+  // this genuine end-to-end encryption rather than just "encrypted in transit":
+  // the server only ever sees ciphertext, never anything it could read.
+  let dmKeyPair = null; // { privateKey, publicKeyJwk } - CryptoKey objects, not serializable directly
+  let dmSharedKeyCache = {}; // partner username -> derived AES-GCM CryptoKey
+
+  async function ensureDmKeyPair(){
+    if(dmKeyPair) return dmKeyPair;
+
+    const storedPrivate = localStorage.getItem('dmPrivateKeyJwk');
+    const storedPublic = localStorage.getItem('dmPublicKeyJwk');
+
+    if(storedPrivate && storedPublic){
+      const privateKey = await crypto.subtle.importKey(
+        'jwk', JSON.parse(storedPrivate), { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']
+      );
+      dmKeyPair = { privateKey, publicKeyJwk: JSON.parse(storedPublic) };
+    }else{
+      const generated = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']
+      );
+      const publicKeyJwk = await crypto.subtle.exportKey('jwk', generated.publicKey);
+      const privateKeyJwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
+      localStorage.setItem('dmPrivateKeyJwk', JSON.stringify(privateKeyJwk));
+      localStorage.setItem('dmPublicKeyJwk', JSON.stringify(publicKeyJwk));
+      dmKeyPair = { privateKey: generated.privateKey, publicKeyJwk };
+
+      // Publish the public half so others can encrypt messages for us — the
+      // private half above never gets sent anywhere.
+      try{
+        await fetch('/__pubkey_register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: getChatDisplayName(), publicKeyJwk })
+        });
+      }catch(e){ /* registration will just retry next time a DM is sent */ }
+    }
+    return dmKeyPair;
+  }
+
+  async function getDmSharedKey(partnerUsername){
+    if(dmSharedKeyCache[partnerUsername]) return dmSharedKeyCache[partnerUsername];
+
+    const myKeys = await ensureDmKeyPair();
+    const response = await fetch('/__pubkey_fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: partnerUsername })
+    });
+    const data = await response.json();
+    if(!data.publicKeyJwk) return null; // partner hasn't opened DMs on any device yet
+
+    const partnerPublicKey = await crypto.subtle.importKey(
+      'jwk', data.publicKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, true, []
+    );
+    const sharedKey = await crypto.subtle.deriveKey(
+      { name: 'ECDH', public: partnerPublicKey },
+      myKeys.privateKey,
+      { name: 'AES-GCM', length: 256 },
+      false, ['encrypt', 'decrypt']
+    );
+    dmSharedKeyCache[partnerUsername] = sharedKey;
+    return sharedKey;
+  }
+
+  function bufferToBase64(buffer){
+    return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  }
+  function base64ToBuffer(base64){
+    return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  }
+
+  async function encryptDmText(plaintext, sharedKey){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(plaintext);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, sharedKey, encoded);
+    return { ciphertext: bufferToBase64(ciphertext), iv: bufferToBase64(iv) };
+  }
+
+  async function decryptDmText(ciphertextB64, ivB64, sharedKey){
+    const ciphertext = base64ToBuffer(ciphertextB64);
+    const iv = base64ToBuffer(ivB64);
+    const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, sharedKey, ciphertext);
+    return new TextDecoder().decode(plainBuffer);
+  }
+
+  async function sendDirectMessage(){
+    const input = document.getElementById('dmInput');
+    const text = input.value.trim();
+    if(!text || !activeDmPartner || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+
+    const sharedKey = await getDmSharedKey(activeDmPartner);
+    if(!sharedKey){
+      alert(`${activeDmPartner} hasn't opened Direct Messages yet on any device, so there's no way to encrypt a message for them yet. Try again once they have.`);
+      return;
+    }
+
+    const { ciphertext, iv } = await encryptDmText(text, sharedKey);
+    liveChatSocket.send(JSON.stringify({ type: 'dm', to: activeDmPartner, ciphertext, iv }));
+    input.value = '';
+    clearTimeout(myDmTypingTimeout);
+    liveChatSocket.send(JSON.stringify({ type: 'stopped_typing', to: activeDmPartner }));
+  }
+
+  function handleDmTyping(){
+    if(!liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN || !activeDmPartner) return;
+    liveChatSocket.send(JSON.stringify({ type: 'typing', to: activeDmPartner }));
+    clearTimeout(myDmTypingTimeout);
+    myDmTypingTimeout = setTimeout(() => {
+      liveChatSocket.send(JSON.stringify({ type: 'stopped_typing', to: activeDmPartner }));
+    }, 2000);
+  }
+
+  function updateDmTypingIndicator(){
+    const el = document.getElementById('dmTypingIndicator');
+    if(!el) return;
+    el.textContent = dmTypingFrom ? (dmTypingFrom + ' is typing...') : '';
+  }
+
+  function notifyNewDM(fromUser, text){
+    playDmNotificationSound();
+    showDmToast(fromUser, text);
+  }
+
+  function playDmNotificationSound(){
+    try{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+      gainNode.gain.setValueAtTime(0.15, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      oscillator.start();
+      oscillator.stop(ctx.currentTime + 0.3);
+    }catch(e){}
+  }
+
+  function showDmToast(fromUser, text){
+    const toast = document.createElement('div');
+    toast.className = 'dm-toast';
+    toast.style.cssText = "position:fixed;top:76px;right:20px;background:var(--panel);border:1px solid var(--accent-pink);border-radius:8px;padding:14px 18px;max-width:280px;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.4);cursor:pointer;animation:toastIn .3s ease;";
+    toast.innerHTML = `<div style="font-family:'Bebas Neue',sans-serif;font-size:15px;color:var(--accent-pink);margin-bottom:4px;">${escapeHtml(fromUser)}</div><div style="font-size:13px;color:#F5F1E8;">${escapeHtml(text.slice(0, 80))}</div>`;
+    toast.onclick = () => {
+      openDirectMessages();
+      selectDmPartner(fromUser);
+      toast.remove();
+    };
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 5000);
+  }
+
+  /* ---- Live Tic-Tac-Toe (real opponent, server holds the authoritative state) ---- */
+  function openLiveTtt(){
+    switchView('livettt');
+    ensureChatConnection();
+    clearGameCursors();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'ttt_join' }));
+      }
+    }, 300); // brief delay so a fresh connection has time to open first
+    initGameCursorTracking('tttGameStage', 'livettt');
+  }
+
+  function renderLiveTtt(state){
+    const grid = document.getElementById('gridLiveTtt');
+    const statusEl = document.getElementById('tttLiveStatus');
+    if(!grid || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    grid.innerHTML = state.board.map((val, i) => {
+      const cls = val === 'X' ? 'x' : (val === 'O' ? 'o' : '');
+      return `<div class="tile-ttt ${cls} ${val ? 'filled' : ''}" onclick="sendTttMove(${i})">${val || ''}</div>`;
+    }).join('');
+
+    const mySymbol = state.players.X === myName ? 'X' : (state.players.O === myName ? 'O' : null);
+
+    if(state.winner === 'draw'){
+      statusEl.textContent = "It's a draw!";
+    }else if(state.winner){
+      statusEl.textContent = mySymbol
+        ? (state.winner === mySymbol ? 'You win!' : 'You lose!')
+        : `${state.winner} wins!`;
+    }else if(!state.players.X || !state.players.O){
+      statusEl.textContent = mySymbol ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!mySymbol){
+      statusEl.textContent = `Spectating — ${state.players.X} (X) vs ${state.players.O} (O). ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === mySymbol ? 'Your turn.' : `Waiting for ${state.turn === 'X' ? state.players.X : state.players.O}...`;
+    }
+  }
+
+  function sendTttMove(cell){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'ttt_move', cell }));
+    }
+  }
+
+  function sendTttReset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'ttt_reset' }));
+    }
+  }
+
+  /* ---- Live Connect 4 (same shared-game pattern) ---- */
+  function openLiveConnect4(){
+    switchView('liveconnect4');
+    ensureChatConnection();
+    clearGameCursors();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'connect4_join' }));
+      }
+    }, 300);
+    initGameCursorTracking('connect4GameStage', 'liveconnect4');
+  }
+
+  function renderLiveConnect4(state){
+    const grid = document.getElementById('gridLiveConnect4');
+    const statusEl = document.getElementById('connect4LiveStatus');
+    if(!grid || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    grid.innerHTML = state.board.map((val, i) => {
+      const col = i % 7;
+      const cls = val === 'red' ? 'red' : (val === 'yellow' ? 'yellow' : '');
+      return `<div class="cell-connect4 ${cls}" onclick="sendConnect4Move(${col})"></div>`;
+    }).join('');
+
+    const myColor = state.players.red === myName ? 'red' : (state.players.yellow === myName ? 'yellow' : null);
+
+    if(state.winner === 'draw'){
+      statusEl.textContent = "It's a draw!";
+    }else if(state.winner){
+      statusEl.textContent = myColor
+        ? (state.winner === myColor ? 'You win!' : 'You lose!')
+        : `${state.winner} wins!`;
+    }else if(!state.players.red || !state.players.yellow){
+      statusEl.textContent = myColor ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!myColor){
+      statusEl.textContent = `Spectating — ${state.players.red} (red) vs ${state.players.yellow} (yellow). ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === myColor ? 'Your turn.' : `Waiting for ${state.turn === 'red' ? state.players.red : state.players.yellow}...`;
+    }
+  }
+
+  function sendConnect4Move(col){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'connect4_move', col }));
+    }
+  }
+
+  function sendConnect4Reset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'connect4_reset' }));
+    }
+  }
+
+  /* ---- Shared Whiteboard ---- */
+  let whiteboardInitialized = false;
+  let whiteboardDrawing = false;
+  let whiteboardLastPoint = null;
+
+  function openWhiteboard(){
+    switchView('whiteboard');
+    ensureChatConnection();
+    clearGameCursors();
+    if(!whiteboardInitialized){
+      initWhiteboard();
+      whiteboardInitialized = true;
+    }
+  }
+
+  function initWhiteboard(){
+    const canvas = document.getElementById('whiteboardCanvas');
+    if(!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    function getPos(e){
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height };
+    }
+
+    function drawLine(x1, y1, x2, y2){
+      ctx.beginPath();
+      ctx.moveTo(x1 * canvas.width, y1 * canvas.height);
+      ctx.lineTo(x2 * canvas.width, y2 * canvas.height);
+      ctx.strokeStyle = '#16234F';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    window._whiteboardDrawLine = drawLine;
+
+    function startDraw(e){
+      whiteboardDrawing = true;
+      whiteboardLastPoint = getPos(e);
+    }
+    function moveDraw(e){
+      if(!whiteboardDrawing) return;
+      const pos = getPos(e);
+      drawLine(whiteboardLastPoint.x, whiteboardLastPoint.y, pos.x, pos.y);
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({
+          type: 'whiteboard_draw',
+          stroke: { x1: whiteboardLastPoint.x, y1: whiteboardLastPoint.y, x2: pos.x, y2: pos.y }
+        }));
+      }
+      whiteboardLastPoint = pos;
+      e.preventDefault();
+    }
+    function endDraw(){ whiteboardDrawing = false; }
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    canvas.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseleave', endDraw);
+    canvas.addEventListener('touchstart', startDraw);
+    canvas.addEventListener('touchmove', moveDraw);
+    canvas.addEventListener('touchend', endDraw);
+  }
+
+  function clearWhiteboard(){
+    const canvas = document.getElementById('whiteboardCanvas');
+    if(canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'whiteboard_clear' }));
+    }
+  }
+
+  /* ---- Live cursors — only shown on the two real-time multiplayer games ---- */
+  let cursorThrottleActive = false;
+
+  function initGameCursorTracking(stageId, pageId){
+    const stage = document.getElementById(stageId);
+    if(!stage || stage.dataset.cursorBound) return;
+    stage.dataset.cursorBound = 'true';
+    stage.addEventListener('mousemove', (e) => {
+      if(cursorThrottleActive) return;
+      cursorThrottleActive = true;
+      setTimeout(() => { cursorThrottleActive = false; }, 50);
+
+      const rect = stage.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = (e.clientY - rect.top) / rect.height;
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'cursor_move', page: pageId, x, y }));
+      }
+    });
+  }
+
+  function renderRemoteCursor(username, x, y, page){
+    const stageIdMap = { livettt: 'tttGameStage', liveconnect4: 'connect4GameStage' };
+    const stageId = stageIdMap[page];
+    if(!stageId || currentActiveView !== page) return;
+    const stage = document.getElementById(stageId);
+    if(!stage) return;
+
+    let dot = document.getElementById('cursor-' + username);
+    if(!dot){
+      dot = document.createElement('div');
+      dot.id = 'cursor-' + username;
+      dot.style.cssText = 'position:absolute;width:10px;height:10px;border-radius:50%;background:var(--accent-pink);pointer-events:none;z-index:50;transition:left .08s linear, top .08s linear;box-shadow:0 0 8px rgba(214,101,155,0.7);';
+      const label = document.createElement('div');
+      label.style.cssText = "position:absolute;top:12px;left:-4px;font-size:10px;color:var(--accent-pink);font-family:'IBM Plex Mono',monospace;white-space:nowrap;";
+      label.textContent = username;
+      dot.appendChild(label);
+      stage.appendChild(dot);
+    }
+    dot.style.left = (x * 100) + '%';
+    dot.style.top = (y * 100) + '%';
+  }
+
+  function clearGameCursors(){
+    document.querySelectorAll('[id^="cursor-"]').forEach(el => el.remove());
+  }
+
+  /* ---- Live Word Chain (real opponent, no AI — server holds the authoritative chain) ---- */
+  function openLiveWordChain(){
+    switchView('livewordchain');
+    ensureChatConnection();
+    setTimeout(() => {
+      if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'wordchain_join' }));
+      }
+    }, 300);
+  }
+
+  function renderLiveWordChain(state){
+    const display = document.getElementById('liveWordChainDisplay');
+    const statusEl = document.getElementById('liveWordChainStatus');
+    if(!display || !statusEl) return;
+    const myName = getChatDisplayName();
+
+    if(state.chain.length === 0){
+      display.innerHTML = '<div class="placeholder-note">Type a word below to start the chain.</div>';
+    }else{
+      display.innerHTML = state.chain.map((word, i) => {
+        const isFirstPlayerWord = i % 2 === 0;
+        const tag = `<span class="chain-word ${isFirstPlayerWord ? 'you' : 'claude'}">${escapeHtml(word)}</span>`;
+        return i === 0 ? tag : `<span class="chain-arrow">→</span>${tag}`;
+      }).join('');
+    }
+
+    const amPlaying = state.players.first === myName || state.players.second === myName;
+
+    if(!state.players.first || !state.players.second){
+      statusEl.textContent = amPlaying ? 'Waiting for an opponent to join...' : 'Waiting for players — spectating.';
+    }else if(!amPlaying){
+      statusEl.textContent = `Spectating — ${state.players.first} and ${state.players.second}. ${state.turn}'s turn.`;
+    }else{
+      statusEl.textContent = state.turn === myName ? 'Your turn.' : `Waiting for ${state.turn}...`;
+    }
+  }
+
+  function sendLiveWordChainMove(){
+    const input = document.getElementById('liveWordChainInput');
+    const feedback = document.getElementById('liveWordChainFeedback');
+    const word = input.value.trim();
+    feedback.textContent = '';
+    if(!word) return;
+    if(word.includes(' ')){
+      feedback.textContent = 'One word at a time.';
+      return;
+    }
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'wordchain_move', word }));
+    }
+    input.value = '';
+  }
+
+  function sendLiveWordChainReset(){
+    if(liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'wordchain_reset' }));
+    }
+  }
+
+  /* ---- Voice calls in Direct Messages ---- */
+  let voiceCallState = null; // { pc, partner, localStream, muted }
+  let pendingVoiceOffer = null; // { from, sdp } — set when an offer arrives before Accept is clicked
+
+  async function fetchTurnCredentials(){
+    const response = await fetch('/__get_turn_credentials', { method: 'POST' });
+    const data = await response.json();
+    if(!data.ok) throw new Error('No call credentials available.');
+    return data.iceServers;
+  }
+
+  function playRemoteStream(stream){
+    const videoEl = document.getElementById('remoteCallVideo');
+    if(videoEl) videoEl.srcObject = stream;
+  }
+
+  // Tries camera + mic first; falls back to mic-only if the camera fails or
+  // isn't available, rather than failing the whole call over it.
+  // wantsVideo is now an explicit choice from the modal, not an automatic
+  // try-video-first — Voice Only means never even prompting for the camera.
+  async function getCallMedia(wantsVideo){
+    if(!wantsVideo){
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return { stream, hasVideo: false };
+    }
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      return { stream, hasVideo: true };
+    }catch(e){
+      // They asked for video but the camera failed (denied, unavailable, etc.) —
+      // fall back to audio rather than blocking the call entirely over it.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return { stream, hasVideo: false };
+    }
+  }
+
+  function setLocalCallVideo(stream, hasVideo){
+    const videoEl = document.getElementById('localCallVideo');
+    if(videoEl) videoEl.srcObject = hasVideo ? stream : null;
+  }
+
+  function openCallChoiceModal(){
+    if(!activeDmPartner) return;
+    const nameEl = document.getElementById('callChoicePartnerName');
+    if(nameEl) nameEl.textContent = activeDmPartner;
+    const modal = document.getElementById('callChoiceModal');
+    if(modal) modal.style.display = 'flex';
+  }
+
+  function closeCallChoiceModal(){
+    const modal = document.getElementById('callChoiceModal');
+    if(modal) modal.style.display = 'none';
+  }
+
+  function confirmStartCall(wantsVideo){
+    closeCallChoiceModal();
+    startVoiceCall(wantsVideo);
+  }
+
+  async function startVoiceCall(wantsVideo){
+    if(!activeDmPartner || voiceCallState) return;
+    const partner = activeDmPartner;
+
+    try{
+      const iceServers = await fetchTurnCredentials();
+      const { stream: localStream, hasVideo } = await getCallMedia(wantsVideo);
+      const pc = new RTCPeerConnection({ iceServers });
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (e) => {
+        if(e.candidate && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+          liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: partner, candidate: e.candidate }));
+        }
+      };
+      pc.ontrack = (e) => playRemoteStream(e.streams[0]);
+      pc.onconnectionstatechange = () => {
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+          endVoiceCall(false);
+        }
+      };
+
+      voiceCallState = { pc, partner, localStream, muted: false, hasVideo, cameraOff: false };
+      setLocalCallVideo(localStream, hasVideo);
+      updateVoiceCallUI('calling', partner);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      liveChatSocket.send(JSON.stringify({ type: 'voice_call_request', to: partner }));
+      liveChatSocket.send(JSON.stringify({ type: 'voice_offer', to: partner, sdp: offer }));
+    }catch(e){
+      alert("Couldn't start the call — check that microphone access is allowed.");
+      voiceCallState = null;
+      updateVoiceCallUI('idle');
+    }
+  }
+
+  function showIncomingCallBanner(fromUser){
+    if(voiceCallState) return; // already on a call — ignore
+    const banner = document.getElementById('incomingCallBanner');
+    const text = document.getElementById('incomingCallText');
+    if(!banner || !text) return;
+    text.textContent = fromUser + ' is calling...';
+    banner.style.display = 'flex';
+  }
+
+  function hideIncomingCallBanner(){
+    const banner = document.getElementById('incomingCallBanner');
+    if(banner) banner.style.display = 'none';
+  }
+
+  async function acceptVoiceCall(){
+    if(!pendingVoiceOffer) return;
+    const { from, sdp } = pendingVoiceOffer;
+
+    try{
+      const iceServers = await fetchTurnCredentials();
+      const { stream: localStream, hasVideo } = await getCallMedia(true);
+      const pc = new RTCPeerConnection({ iceServers });
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (e) => {
+        if(e.candidate && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+          liveChatSocket.send(JSON.stringify({ type: 'voice_ice_candidate', to: from, candidate: e.candidate }));
+        }
+      };
+      pc.ontrack = (e) => playRemoteStream(e.streams[0]);
+      pc.onconnectionstatechange = () => {
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+          endVoiceCall(false);
+        }
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      liveChatSocket.send(JSON.stringify({ type: 'voice_answer', to: from, sdp: answer }));
+
+      voiceCallState = { pc, partner: from, localStream, muted: false, hasVideo, cameraOff: false };
+      setLocalCallVideo(localStream, hasVideo);
+      pendingVoiceOffer = null;
+      hideIncomingCallBanner();
+      updateVoiceCallUI('active', from);
+    }catch(e){
+      alert("Couldn't join the call — check that microphone access is allowed.");
+      pendingVoiceOffer = null;
+      hideIncomingCallBanner();
+    }
+  }
+
+  function rejectVoiceCall(){
+    if(pendingVoiceOffer && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+      liveChatSocket.send(JSON.stringify({ type: 'voice_call_end', to: pendingVoiceOffer.from }));
+    }
+    pendingVoiceOffer = null;
+    hideIncomingCallBanner();
+  }
+
+  function endVoiceCall(notifyOther){
+    if(voiceCallState){
+      if(notifyOther && liveChatSocket && liveChatSocket.readyState === WebSocket.OPEN){
+        liveChatSocket.send(JSON.stringify({ type: 'voice_call_end', to: voiceCallState.partner }));
+      }
+      try{ voiceCallState.pc.close(); }catch(e){}
+      voiceCallState.localStream.getTracks().forEach(t => t.stop());
+      if(voiceCallState.screenStream){
+        voiceCallState.screenStream.getTracks().forEach(t => t.stop());
+      }
+      voiceCallState = null;
+    }
+    const remoteVideo = document.getElementById('remoteCallVideo');
+    const localVideo = document.getElementById('localCallVideo');
+    if(remoteVideo) remoteVideo.srcObject = null;
+    if(localVideo) localVideo.srcObject = null;
+    const shareBtn = document.getElementById('screenShareBtn');
+    if(shareBtn) shareBtn.textContent = 'Share Screen';
+    if(document.fullscreenElement || document.webkitFullscreenElement){
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if(exit) exit.call(document);
+    }
+    updateVoiceCallUI('idle');
+  }
+
+  function toggleCameraVoiceCall(){
+    if(!voiceCallState || !voiceCallState.hasVideo) return;
+    voiceCallState.cameraOff = !voiceCallState.cameraOff;
+    voiceCallState.localStream.getVideoTracks().forEach(track => { track.enabled = !voiceCallState.cameraOff; });
+    const btn = document.getElementById('cameraCallBtn');
+    if(btn) btn.textContent = voiceCallState.cameraOff ? 'Camera On' : 'Camera Off';
+  }
+
+  // Screen sharing swaps the outgoing video track on the call that's already
+  // connected — no renegotiation needed, just a clean substitution. Kept to
+  // video calls specifically, since a voice-only call has no video sender to
+  // swap in the first place, and adding one mid-call would need a much more
+  // fragile bit of signaling than this deliberately doesn't take on.
+  function toggleCallFullscreen(){
+    const area = document.getElementById('videoCallArea');
+    if(!area) return;
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+    if(!isFullscreen){
+      const request = area.requestFullscreen || area.webkitRequestFullscreen;
+      if(request) request.call(area);
+    }else{
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if(exit) exit.call(document);
+    }
+  }
+
+  async function toggleScreenShare(){
+    if(!voiceCallState) return;
+    if(!voiceCallState.hasVideo){
+      alert("Screen sharing needs a video call. Hang up and call again, choosing Video this time.");
+      return;
+    }
+
+    const btn = document.getElementById('screenShareBtn');
+
+    if(voiceCallState.screenStream){
+      // Currently sharing — stop and switch back to the camera
+      voiceCallState.screenStream.getTracks().forEach(t => t.stop());
+      voiceCallState.screenStream = null;
+      const cameraTrack = voiceCallState.localStream.getVideoTracks()[0];
+      const sender = voiceCallState.pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if(sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+      setLocalCallVideo(voiceCallState.localStream, true);
+      if(btn) btn.textContent = 'Share Screen';
+      return;
+    }
+
+    try{
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      const sender = voiceCallState.pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if(sender) await sender.replaceTrack(screenTrack);
+      voiceCallState.screenStream = screenStream;
+      setLocalCallVideo(screenStream, true);
+      if(btn) btn.textContent = 'Stop Sharing';
+
+      // The browser's own native "Stop sharing" bar can end this outside our
+      // button entirely — this catches that and reverts cleanly either way.
+      screenTrack.onended = () => {
+        if(voiceCallState && voiceCallState.screenStream){
+          toggleScreenShare();
+        }
+      };
+    }catch(e){
+      // They cancelled the screen-picker prompt, or it wasn't allowed — no error needed
+    }
+  }
+
+  function toggleMuteVoiceCall(){
+    if(!voiceCallState) return;
+    voiceCallState.muted = !voiceCallState.muted;
+    voiceCallState.localStream.getAudioTracks().forEach(track => { track.enabled = !voiceCallState.muted; });
+    const btn = document.getElementById('muteCallBtn');
+    if(btn) btn.textContent = voiceCallState.muted ? 'Unmute' : 'Mute';
+    const navBtn = document.getElementById('navMuteBtn');
+    if(navBtn) navBtn.textContent = voiceCallState.muted ? 'Unmute' : 'Mute';
+  }
+
+  function sendCallReaction(emoji){
+    if(!voiceCallState || !liveChatSocket || liveChatSocket.readyState !== WebSocket.OPEN) return;
+    liveChatSocket.send(JSON.stringify({ type: 'voice_reaction', to: voiceCallState.partner, emoji }));
+    showFloatingReaction(emoji);
+  }
+
+  function showFloatingReaction(emoji){
+    const overlay = document.getElementById('callReactionsOverlay');
+    if(!overlay) return;
+    const el = document.createElement('div');
+    el.className = 'call-reaction-float';
+    el.textContent = emoji;
+    el.style.left = (20 + Math.random() * 60) + '%';
+    overlay.appendChild(el);
+    setTimeout(() => el.remove(), 2200);
+  }
+
+  function updateVoiceCallUI(state, partner){
+    const callBtn = document.getElementById('voiceCallBtn');
+    const activeBar = document.getElementById('activeCallBar');
+    const activeText = document.getElementById('activeCallText');
+    const navBar = document.getElementById('navCallBar');
+    const navText = document.getElementById('navCallText');
+    const videoArea = document.getElementById('videoCallArea');
+    const cameraBtn = document.getElementById('cameraCallBtn');
+    if(!callBtn || !activeBar || !activeText || !navBar || !navText) return;
+
+    if(state === 'idle'){
+      activeBar.style.display = 'none';
+      callBtn.style.display = activeDmPartner ? 'inline-block' : 'none';
+      navBar.style.display = 'none';
+      if(videoArea) videoArea.style.display = 'none';
+      if(cameraBtn) cameraBtn.style.display = 'none';
+    }else if(state === 'calling'){
+      callBtn.style.display = 'none';
+      activeBar.style.display = 'flex';
+      activeText.textContent = 'Calling ' + partner + '...';
+      navBar.style.display = 'flex';
+      navText.textContent = 'Calling ' + partner + '...';
+      if(videoArea && voiceCallState) videoArea.style.display = voiceCallState.hasVideo ? 'block' : 'none';
+      if(cameraBtn) cameraBtn.style.display = (voiceCallState && voiceCallState.hasVideo) ? 'inline-block' : 'none';
+    }else if(state === 'active'){
+      callBtn.style.display = 'none';
+      activeBar.style.display = 'flex';
+      activeText.textContent = 'On call with ' + partner;
+      navBar.style.display = 'flex';
+      navText.textContent = 'On call: ' + partner;
+      if(videoArea && voiceCallState) videoArea.style.display = voiceCallState.hasVideo ? 'block' : 'none';
+      if(cameraBtn) cameraBtn.style.display = (voiceCallState && voiceCallState.hasVideo) ? 'inline-block' : 'none';
+    }
+  }
+
+  /* ---- Challenges Hub: Daily Trivia / Typing / Puzzle (personal use, no leaderboard) ---- */
+  const TRIVIA_POOL = [
+    { q: "What planet is known as the Red Planet?", options: ["Venus", "Mars", "Jupiter", "Mercury"], correct: 1 },
+    { q: "How many continents are there?", options: ["5", "6", "7", "8"], correct: 2 },
+    { q: "What is the capital of Australia?", options: ["Sydney", "Melbourne", "Canberra", "Perth"], correct: 2 },
+    { q: "Which gas do plants absorb from the atmosphere?", options: ["Oxygen", "Nitrogen", "Carbon Dioxide", "Hydrogen"], correct: 2 },
+    { q: "Who wrote Romeo and Juliet?", options: ["Charles Dickens", "William Shakespeare", "Jane Austen", "Mark Twain"], correct: 1 },
+    { q: "What is the largest ocean on Earth?", options: ["Atlantic", "Indian", "Arctic", "Pacific"], correct: 3 },
+    { q: "How many strings does a standard guitar have?", options: ["4", "5", "6", "7"], correct: 2 },
+    { q: "What year did World War II end?", options: ["1943", "1945", "1947", "1950"], correct: 1 },
+    { q: "What is the chemical symbol for gold?", options: ["Go", "Gd", "Au", "Ag"], correct: 2 },
+    { q: "Which country invented pizza?", options: ["France", "Greece", "Italy", "Spain"], correct: 2 },
+    { q: "How many bones are in the adult human body?", options: ["186", "206", "226", "246"], correct: 1 },
+    { q: "What is the smallest prime number?", options: ["0", "1", "2", "3"], correct: 2 },
+    { q: "Which planet has the most moons?", options: ["Jupiter", "Saturn", "Neptune", "Uranus"], correct: 1 },
+    { q: "What language has the most native speakers worldwide?", options: ["English", "Spanish", "Mandarin", "Hindi"], correct: 2 },
+    { q: "What is the tallest mountain in the world?", options: ["K2", "Kangchenjunga", "Everest", "Denali"], correct: 2 }
+  ];
+
+  const TYPING_POOL = [
+    "The quick brown fox jumps over the lazy dog.",
+    "Practice makes progress, not perfection.",
+    "A journey of a thousand miles begins with a single step.",
+    "Simplicity is the ultimate form of sophistication.",
+    "The early bird catches the worm, but the second mouse gets the cheese.",
+    "Success is the sum of small efforts repeated daily.",
+    "Consistency beats intensity when intensity isn't consistent.",
+    "Curiosity is the engine of achievement.",
+    "The best time to plant a tree was twenty years ago, the second best time is now.",
+    "Focus on being productive instead of busy.",
+    "Small steps every day add up to big results.",
+    "Discipline is choosing between what you want now and what you want most.",
+    "Every expert was once a beginner who refused to give up.",
+    "Clarity comes from action, not thought.",
+    "Patience and persistence outlast raw talent."
+  ];
+
+  const PUZZLE_POOL = [
+    { riddle: "I have keys but no locks, space but no room. What am I?", answer: "keyboard" },
+    { riddle: "What has hands but cannot clap?", answer: "clock" },
+    { riddle: "The more you take, the more you leave behind. What am I?", answer: "footsteps" },
+    { riddle: "What gets wetter as it dries?", answer: "towel" },
+    { riddle: "I speak without a mouth and hear without ears. What am I?", answer: "echo" },
+    { riddle: "What has a neck but no head?", answer: "bottle" },
+    { riddle: "What can travel around the world while staying in a corner?", answer: "stamp" },
+    { riddle: "What has one eye but cannot see?", answer: "needle" },
+    { riddle: "What month of the year has 28 days?", answer: "all of them" },
+    { riddle: "What goes up but never comes down?", answer: "age" },
+    { riddle: "What has many teeth but cannot bite?", answer: "comb" },
+    { riddle: "What can you catch but not throw?", answer: "cold" },
+    { riddle: "What has a face and two hands but no arms or legs?", answer: "clock" },
+    { riddle: "What building has the most stories?", answer: "library" },
+    { riddle: "What invention lets you look right through a wall?", answer: "window" }
+  ];
+
+  function getDayOfYear(){
+    const now = new Date();
+    const start = new Date(now.getFullYear(), 0, 0);
+    const diff = now - start;
+    return Math.floor(diff / (1000 * 60 * 60 * 24));
+  }
+
+  function getTodayKey(){
+    const now = new Date();
+    return `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()}`;
+  }
+
+  function getYesterdayKey(){
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    return `${yesterday.getFullYear()}-${yesterday.getMonth()+1}-${yesterday.getDate()}`;
+  }
+
+  function todayDateLabel(){
+    return new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  function completeStreak(state){
+    const todayKey = getTodayKey();
+    if(state.lastCompletedKey === todayKey) return state;
+    state.streak = (state.lastCompletedKey === getYesterdayKey()) ? state.streak + 1 : 1;
+    state.lastCompletedKey = todayKey;
+    return state;
+  }
+
+  /* --- Daily Trivia --- */
+  let triviaState = { streak: 0, lastCompletedKey: null };
+
+  async function loadTrivia(){
+    try{
+      const res = await window.storage.get('trivia-state', false);
+      if(res && res.value) triviaState = JSON.parse(res.value);
+    }catch(e){}
+    renderTrivia();
+  }
+
+  function renderTrivia(){
+    document.getElementById('triviaDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('triviaStreakCount'), triviaState.streak);
+    const card = document.getElementById('triviaCard');
+    const dayOfYear = getDayOfYear();
+
+    if(triviaState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already answered today's trivia. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const item = TRIVIA_POOL[dayOfYear % TRIVIA_POOL.length];
+    card.innerHTML = `
+      <div class="riddle-label">Today's Trivia</div>
+      <div class="riddle-text">${escapeHtml(item.q)}</div>
+      <div class="upgrade-grid">
+        ${item.options.map((opt, i) => `<button class="timer-btn" style="width:100%;text-align:left;" onclick="answerTrivia(${i}, ${item.correct})">${escapeHtml(opt)}</button>`).join('')}
+      </div>
+      <div class="riddle-feedback" id="triviaFeedback"></div>
+    `;
+  }
+
+  function answerTrivia(chosen, correct){
+    const feedback = document.getElementById('triviaFeedback');
+    if(chosen === correct){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      triviaState = completeStreak(triviaState);
+      window.storage.set('trivia-state', JSON.stringify(triviaState), false).catch(() => {});
+      animateNumber(document.getElementById('triviaStreakCount'), triviaState.streak);
+    }else{
+      feedback.textContent = 'Not quite — try again tomorrow for a new one.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  /* --- Daily Typing Test --- */
+  let typingState = { streak: 0, lastCompletedKey: null };
+  let typingStartTime = null;
+
+  async function loadTypingChallenge(){
+    try{
+      const res = await window.storage.get('typing-state', false);
+      if(res && res.value) typingState = JSON.parse(res.value);
+    }catch(e){}
+    renderTypingChallenge();
+  }
+
+  function renderTypingChallenge(){
+    document.getElementById('typingDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('typingStreakCount'), typingState.streak);
+    const card = document.getElementById('typingCard');
+    const dayOfYear = getDayOfYear();
+
+    if(typingState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already finished today's typing test. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const sentence = TYPING_POOL[dayOfYear % TYPING_POOL.length];
+    typingStartTime = null;
+    card.innerHTML = `
+      <div class="riddle-label">Type this exactly</div>
+      <div class="riddle-text" style="font-family:'IBM Plex Mono',monospace;font-size:15px;">${escapeHtml(sentence)}</div>
+      <textarea id="typingInput" oninput="handleTypingStart()" placeholder="Start typing here..." style="width:100%;min-height:80px;background:var(--ink);border:1px solid var(--line);color:#F5F1E8;padding:12px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:14px;margin:14px 0;"></textarea>
+      <button class="timer-btn primary" onclick="submitTyping('${btoa(encodeURIComponent(sentence))}')">Submit</button>
+      <div class="riddle-feedback" id="typingFeedback"></div>
+    `;
+  }
+
+  function handleTypingStart(){
+    if(typingStartTime === null) typingStartTime = Date.now();
+  }
+
+  function submitTyping(encodedSentence){
+    const target = decodeURIComponent(atob(encodedSentence));
+    const typed = document.getElementById('typingInput').value;
+    const feedback = document.getElementById('typingFeedback');
+
+    let matches = 0;
+    for(let i = 0; i < Math.min(target.length, typed.length); i++){
+      if(target[i] === typed[i]) matches++;
+    }
+    const accuracy = Math.round((matches / target.length) * 100);
+    const seconds = typingStartTime ? (Date.now() - typingStartTime) / 1000 : 0;
+    const words = target.split(' ').length;
+    const wpm = seconds > 0 ? Math.round((words / seconds) * 60) : 0;
+
+    if(accuracy >= 90){
+      feedback.textContent = `Nice — ${accuracy}% accuracy, about ${wpm} WPM.`;
+      feedback.className = 'riddle-feedback correct answered';
+      typingState = completeStreak(typingState);
+      window.storage.set('typing-state', JSON.stringify(typingState), false).catch(() => {});
+      animateNumber(document.getElementById('typingStreakCount'), typingState.streak);
+    }else{
+      feedback.textContent = `${accuracy}% accuracy — need at least 90% to complete. Try again tomorrow.`;
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  /* --- Daily Puzzle --- */
+  let puzzleDailyState = { streak: 0, lastCompletedKey: null };
+  let currentDailyPuzzleAnswer = null;
+
+  async function loadDailyPuzzle(){
+    try{
+      const res = await window.storage.get('puzzle-daily-state', false);
+      if(res && res.value) puzzleDailyState = JSON.parse(res.value);
+    }catch(e){}
+    renderDailyPuzzle();
+  }
+
+  function renderDailyPuzzle(){
+    document.getElementById('puzzleDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('puzzleStreakCount'), puzzleDailyState.streak);
+    const card = document.getElementById('puzzleDailyCard');
+    const dayOfYear = getDayOfYear();
+
+    if(puzzleDailyState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already solved today's puzzle. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const item = PUZZLE_POOL[dayOfYear % PUZZLE_POOL.length];
+    currentDailyPuzzleAnswer = item.answer;
+    card.innerHTML = `
+      <div class="riddle-label">Today's Puzzle</div>
+      <div class="riddle-text">${escapeHtml(item.riddle)}</div>
+      <div class="riddle-answer-row">
+        <input type="text" id="dailyPuzzleAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" onclick="submitDailyPuzzleAnswer()">Submit</button>
+      </div>
+      <div class="riddle-feedback" id="puzzleDailyFeedback"></div>
+    `;
+  }
+
+  function submitDailyPuzzleAnswer(){
+    const guess = document.getElementById('dailyPuzzleAnswerInput').value.trim().toLowerCase();
+    const feedback = document.getElementById('puzzleDailyFeedback');
+    if(!guess || !currentDailyPuzzleAnswer) return;
+    const correct = currentDailyPuzzleAnswer.toLowerCase();
+    if(guess === correct || correct.includes(guess) || guess.includes(correct)){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      puzzleDailyState = completeStreak(puzzleDailyState);
+      window.storage.set('puzzle-daily-state', JSON.stringify(puzzleDailyState), false).catch(() => {});
+      animateNumber(document.getElementById('puzzleStreakCount'), puzzleDailyState.streak);
+    }else{
+      feedback.textContent = 'Not quite — try again tomorrow for a new one.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  /* --- Word Scramble --- */
+  const SCRAMBLE_POOL = [
+    { word: "keyboard", scrambled: "oydearkb" },
+    { word: "sunshine", scrambled: "hussinen" },
+    { word: "elephant", scrambled: "hetlpean" },
+    { word: "mountain", scrambled: "niatnuom" },
+    { word: "notebook", scrambled: "keoobtno" },
+    { word: "umbrella", scrambled: "belrmalu" },
+    { word: "triangle", scrambled: "gtaenlri" },
+    { word: "adventure", scrambled: "nrutaveed" },
+    { word: "chocolate", scrambled: "hooeclatc" },
+    { word: "butterfly", scrambled: "ttbrfyleu" },
+    { word: "telephone", scrambled: "eelhpteon" },
+    { word: "waterfall", scrambled: "aftlarelw" },
+    { word: "chameleon", scrambled: "aemhcnole" },
+    { word: "backpack", scrambled: "abpckakc" },
+    { word: "dandelion", scrambled: "nlaeidond" }
+  ];
+
+  let scrambleState = { streak: 0, lastCompletedKey: null };
+
+  async function loadScramble(){
+    try{
+      const res = await window.storage.get('scramble-state', false);
+      if(res && res.value) scrambleState = JSON.parse(res.value);
+    }catch(e){}
+    renderScramble();
+  }
+
+  function renderScramble(){
+    document.getElementById('scrambleDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('scrambleStreakCount'), scrambleState.streak);
+    const card = document.getElementById('scrambleCard');
+    const dayOfYear = getDayOfYear();
+
+    if(scrambleState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already unscrambled today's word. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const item = SCRAMBLE_POOL[dayOfYear % SCRAMBLE_POOL.length];
+    card.innerHTML = `
+      <div class="riddle-label">Unscramble this word</div>
+      <div class="riddle-text" style="font-family:'IBM Plex Mono',monospace;font-size:28px;letter-spacing:.1em;">${escapeHtml(item.scrambled.toUpperCase())}</div>
+      <div class="riddle-answer-row">
+        <input type="text" id="scrambleAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" onclick="submitScrambleAnswer('${item.word}')">Submit</button>
+      </div>
+      <div class="riddle-feedback" id="scrambleFeedback"></div>
+    `;
+  }
+
+  function submitScrambleAnswer(correctWord){
+    const guess = document.getElementById('scrambleAnswerInput').value.trim().toLowerCase();
+    const feedback = document.getElementById('scrambleFeedback');
+    if(!guess) return;
+    if(guess === correctWord.toLowerCase()){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      scrambleState = completeStreak(scrambleState);
+      window.storage.set('scramble-state', JSON.stringify(scrambleState), false).catch(() => {});
+      animateNumber(document.getElementById('scrambleStreakCount'), scrambleState.streak);
+    }else{
+      feedback.textContent = 'Not quite — try again tomorrow for a new one.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  /* --- Math Challenge --- */
+  const MATH_POOL = [
+    { q: "What is 17 × 4?", answer: 68 },
+    { q: "What is 144 ÷ 12?", answer: 12 },
+    { q: "What is 9² (9 squared)?", answer: 81 },
+    { q: "What is 15% of 200?", answer: 30 },
+    { q: "What is 7 + 8 × 3?", answer: 31 },
+    { q: "What is the square root of 169?", answer: 13 },
+    { q: "What is 250 − 87?", answer: 163 },
+    { q: "What is 6 × 6 × 2?", answer: 72 },
+    { q: "What is 3/4 of 100?", answer: 75 },
+    { q: "What is 13 × 13?", answer: 169 },
+    { q: "What is 500 ÷ 25?", answer: 20 },
+    { q: "What is 2³ + 3² (2 cubed plus 3 squared)?", answer: 17 },
+    { q: "What is 45 + 55 − 30?", answer: 70 },
+    { q: "What is 8 × 9 − 12?", answer: 60 },
+    { q: "What is 1000 ÷ 8?", answer: 125 }
+  ];
+
+  let mathState = { streak: 0, lastCompletedKey: null };
+
+  async function loadMathChallenge(){
+    try{
+      const res = await window.storage.get('math-state', false);
+      if(res && res.value) mathState = JSON.parse(res.value);
+    }catch(e){}
+    renderMathChallenge();
+  }
+
+  function renderMathChallenge(){
+    document.getElementById('mathDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('mathStreakCount'), mathState.streak);
+    const card = document.getElementById('mathCard');
+    const dayOfYear = getDayOfYear();
+
+    if(mathState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already solved today's maths problem. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const item = MATH_POOL[dayOfYear % MATH_POOL.length];
+    card.innerHTML = `
+      <div class="riddle-label">Today's Problem</div>
+      <div class="riddle-text" style="font-size:20px;">${escapeHtml(item.q)}</div>
+      <div class="riddle-answer-row">
+        <input type="number" id="mathAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" onclick="submitMathAnswer(${item.answer})">Submit</button>
+      </div>
+      <div class="riddle-feedback" id="mathFeedback"></div>
+    `;
+  }
+
+  function submitMathAnswer(correctAnswer){
+    const guess = parseFloat(document.getElementById('mathAnswerInput').value);
+    const feedback = document.getElementById('mathFeedback');
+    if(isNaN(guess)) return;
+    if(guess === correctAnswer){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      mathState = completeStreak(mathState);
+      window.storage.set('math-state', JSON.stringify(mathState), false).catch(() => {});
+      animateNumber(document.getElementById('mathStreakCount'), mathState.streak);
+    }else{
+      feedback.textContent = 'Not quite — try again tomorrow for a new one.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  /* --- Emoji Puzzle --- */
+  const EMOJI_POOL = [
+    { emoji: "🦁👑", answers: ["lion king", "the lion king"] },
+    { emoji: "🍯🐻", answers: ["winnie the pooh", "pooh bear", "winnie pooh"] },
+    { emoji: "🕷️👦", answers: ["spiderman", "spider-man"] },
+    { emoji: "❄️👸", answers: ["frozen"] },
+    { emoji: "🐠🔍", answers: ["finding nemo"] },
+    { emoji: "🏠⬆️🎈", answers: ["up"] },
+    { emoji: "🌊🐟", answers: ["under the sea", "the little mermaid"] },
+    { emoji: "🍫🏭", answers: ["charlie and the chocolate factory", "willy wonka"] },
+    { emoji: "🐭🧀", answers: ["mouse trap", "cat and mouse"] },
+    { emoji: "☔🐱🐶", answers: ["raining cats and dogs"] },
+    { emoji: "🍎📱", answers: ["apple"] },
+    { emoji: "🌙🚶", answers: ["moonwalk", "man on the moon"] },
+    { emoji: "🔥👨", answers: ["firefighter", "fireman"] },
+    { emoji: "🐝🎥", answers: ["bee movie"] },
+    { emoji: "❤️💔", answers: ["broken heart", "heartbreak"] }
+  ];
+
+  let emojiState = { streak: 0, lastCompletedKey: null };
+
+  async function loadEmojiChallenge(){
+    try{
+      const res = await window.storage.get('emoji-state', false);
+      if(res && res.value) emojiState = JSON.parse(res.value);
+    }catch(e){}
+    renderEmojiChallenge();
+  }
+
+  function renderEmojiChallenge(){
+    document.getElementById('emojiDate').textContent = todayDateLabel();
+    animateNumber(document.getElementById('emojiStreakCount'), emojiState.streak);
+    const card = document.getElementById('emojiCard');
+    const dayOfYear = getDayOfYear();
+
+    if(emojiState.lastCompletedKey === getTodayKey()){
+      card.innerHTML = `<div class="riddle-label">Completed</div><div class="riddle-text">You've already solved today's emoji puzzle. Come back tomorrow for a new one.</div>`;
+      return;
+    }
+    const item = EMOJI_POOL[dayOfYear % EMOJI_POOL.length];
+    card.innerHTML = `
+      <div class="riddle-label">What does this mean?</div>
+      <div class="riddle-text" style="font-size:44px;">${item.emoji}</div>
+      <div class="riddle-answer-row">
+        <input type="text" id="emojiAnswerInput" placeholder="Your answer...">
+        <button class="timer-btn primary" onclick='submitEmojiAnswer(${JSON.stringify(item.answers)})'>Submit</button>
+      </div>
+      <div class="riddle-feedback" id="emojiFeedback"></div>
+    `;
+  }
+
+  function submitEmojiAnswer(validAnswers){
+    const guess = document.getElementById('emojiAnswerInput').value.trim().toLowerCase();
+    const feedback = document.getElementById('emojiFeedback');
+    if(!guess) return;
+    const isCorrect = validAnswers.some(a => guess === a || a.includes(guess) || guess.includes(a));
+    if(isCorrect){
+      feedback.textContent = 'Correct!';
+      feedback.className = 'riddle-feedback correct answered';
+      emojiState = completeStreak(emojiState);
+      window.storage.set('emoji-state', JSON.stringify(emojiState), false).catch(() => {});
+      animateNumber(document.getElementById('emojiStreakCount'), emojiState.streak);
+    }else{
+      feedback.textContent = 'Not quite — try again tomorrow for a new one.';
+      feedback.className = 'riddle-feedback incorrect';
+    }
+  }
+
+  loadTrivia();
+  loadTypingChallenge();
+  loadDailyPuzzle();
+  loadScramble();
+  loadMathChallenge();
+  loadEmojiChallenge();
+
+
+  /* ---- Quick Calculator ---- */
+  let calcExpr = '';
+
+  function setCalcMode(mode){
+    document.getElementById('calcModeCalc').classList.toggle('active', mode === 'calc');
+    document.getElementById('calcModeConvert').classList.toggle('active', mode === 'convert');
+    document.getElementById('calcPanel').style.display = mode === 'calc' ? 'block' : 'none';
+    document.getElementById('convertPanel').style.display = mode === 'convert' ? 'block' : 'none';
+  }
+
+  function calcInput(ch){
+    calcExpr += ch;
+    document.getElementById('calcDisplay').textContent = calcExpr;
+  }
+
+  function calcClear(){
+    calcExpr = '';
+    document.getElementById('calcDisplay').textContent = '0';
+  }
+
+  function calcBackspace(){
+    calcExpr = calcExpr.slice(0, -1);
+    document.getElementById('calcDisplay').textContent = calcExpr || '0';
+  }
+
+  function calcEquals(){
+    if(!calcExpr) return;
+    if(!/^[0-9+\-*/().\s]+$/.test(calcExpr)){
+      document.getElementById('calcDisplay').textContent = 'Error';
+      calcExpr = '';
+      return;
+    }
+    try{
+      const result = Function('"use strict"; return (' + calcExpr + ')')();
+      const display = Number.isFinite(result) ? String(Math.round(result * 1e10) / 1e10) : 'Error';
+      document.getElementById('calcDisplay').textContent = display;
+      calcExpr = display === 'Error' ? '' : display;
+    }catch(e){
+      document.getElementById('calcDisplay').textContent = 'Error';
+      calcExpr = '';
+    }
+  }
+
+  /* ---- Unit Converter ---- */
+  const CONVERT_UNITS = {
+    length: { label: 'Length', units: { Metres:1, Kilometres:1000, Centimetres:0.01, Millimetres:0.001, Miles:1609.344, Yards:0.9144, Feet:0.3048, Inches:0.0254 } },
+    mass:   { label: 'Mass', units: { Kilograms:1, Grams:0.001, Pounds:0.45359237, Ounces:0.028349523 } },
+    volume: { label: 'Volume', units: { Litres:1, Millilitres:0.001, Gallons:3.785411784, Cups:0.24 } },
+    temperature: { label: 'Temperature', units: { Celsius:'C', Fahrenheit:'F', Kelvin:'K' } }
+  };
+
+  function populateConvertCategory(){
+    const cat = document.getElementById('convertCategory');
+    cat.innerHTML = Object.entries(CONVERT_UNITS).map(([key, val]) => `<option value="${key}">${val.label}</option>`).join('');
+    onConvertCategoryChange();
+  }
+
+  function onConvertCategoryChange(){
+    const catKey = document.getElementById('convertCategory').value;
+    const units = Object.keys(CONVERT_UNITS[catKey].units);
+    const fromSel = document.getElementById('convertFrom');
+    const toSel = document.getElementById('convertTo');
+    fromSel.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    toSel.innerHTML = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    if(units.length > 1) toSel.selectedIndex = 1;
+    runConvert();
+  }
+
+  function runConvert(){
+    const catKey = document.getElementById('convertCategory').value;
+    const from = document.getElementById('convertFrom').value;
+    const to = document.getElementById('convertTo').value;
+    const val = parseFloat(document.getElementById('convertInput').value);
+    const resultEl = document.getElementById('convertResult');
+
+    if(isNaN(val)){ resultEl.textContent = '0'; return; }
+
+    if(catKey === 'temperature'){
+      let celsius;
+      if(from === 'Celsius') celsius = val;
+      else if(from === 'Fahrenheit') celsius = (val - 32) * 5/9;
+      else celsius = val - 273.15;
+
+      let result;
+      if(to === 'Celsius') result = celsius;
+      else if(to === 'Fahrenheit') result = celsius * 9/5 + 32;
+      else result = celsius + 273.15;
+
+      resultEl.textContent = (Math.round(result * 100) / 100).toString();
+    }else{
+      const units = CONVERT_UNITS[catKey].units;
+      const base = val * units[from];
+      const result = base / units[to];
+      resultEl.textContent = (Math.round(result * 1e6) / 1e6).toString();
+    }
+  }
+
+  populateConvertCategory();
+
+  /* ---- Formula Sheet ---- */
+  const FORMULAS = {
+    maths: [
+      // --- KS3 ---
+      { tier: 'KS3', name: 'Perimeter of a Rectangle', expr: 'P = 2(l + w)', note: '' },
+      { tier: 'KS3', name: 'Area of a Rectangle', expr: 'A = l × w', note: '' },
+      { tier: 'KS3', name: 'Area of a Square', expr: 'A = s²', note: '' },
+      { tier: 'KS3', name: 'Area of a Parallelogram', expr: 'A = base × height', note: '' },
+      { tier: 'KS3', name: 'Area of a Trapezium', expr: 'A = ½(a + b)h', note: 'a, b = parallel sides' },
+      { tier: 'KS3', name: 'Volume of a Cuboid', expr: 'V = l × w × h', note: '' },
+      { tier: 'KS3', name: 'Volume of a Cube', expr: 'V = s³', note: '' },
+      { tier: 'KS3', name: 'Circumference of a Circle', expr: 'C = 2πr  or  C = πd', note: '' },
+      { tier: 'KS3', name: 'Area of a Circle', expr: 'A = πr²', note: '' },
+      { tier: 'KS3', name: 'Area of a Triangle', expr: 'A = ½ × base × height', note: '' },
+      { tier: 'KS3', name: 'Mean Average', expr: 'mean = sum of values / number of values', note: '' },
+      { tier: 'KS3', name: 'Range', expr: 'range = highest value - lowest value', note: '' },
+      { tier: 'KS3', name: 'Speed', expr: 'speed = distance / time', note: '' },
+      { tier: 'KS3', name: 'Percentage of an Amount', expr: '(percentage / 100) × amount', note: '' },
+      { tier: 'KS3', name: 'Simple Interest', expr: 'I = (P × R × T) / 100', note: 'P=principal, R=rate, T=time' },
+      { tier: 'KS3', name: 'Basic Probability', expr: 'P(event) = favourable outcomes / total outcomes', note: '' },
+      { tier: 'KS3', name: "Pythagoras' Theorem", expr: 'a² + b² = c²', note: 'c is the hypotenuse' },
+      { tier: 'KS3', name: 'Angle Sum of a Triangle', expr: 'sum of angles = 180°', note: '' },
+      { tier: 'KS3', name: 'Angle Sum of a Quadrilateral', expr: 'sum of angles = 360°', note: '' },
+      { tier: 'KS3', name: 'Exterior Angle of a Regular Polygon', expr: '360° / n', note: 'n = number of sides' },
+      { tier: 'KS3', name: 'Interior Angle of a Regular Polygon', expr: '((n - 2) × 180°) / n', note: '' },
+      // --- GCSE ---
+      { tier: 'GCSE', name: 'Quadratic Formula', expr: 'x = (-b ± √(b² - 4ac)) / 2a', note: 'Solves ax² + bx + c = 0' },
+      { tier: 'GCSE', name: 'Completing the Square', expr: 'x² + bx = (x + b/2)² - (b/2)²', note: '' },
+      { tier: 'GCSE', name: 'Difference of Two Squares', expr: 'a² - b² = (a + b)(a - b)', note: '' },
+      { tier: 'GCSE', name: 'Laws of Indices', expr: 'aᵐ×aⁿ=aᵐ⁺ⁿ,  aᵐ/aⁿ=aᵐ⁻ⁿ,  (aᵐ)ⁿ=aᵐⁿ,  a⁰=1,  a⁻ⁿ=1/aⁿ', note: '' },
+      { tier: 'GCSE', name: 'Arc Length', expr: 'L = (θ/360) × 2πr', note: 'θ in degrees' },
+      { tier: 'GCSE', name: 'Sector Area', expr: 'A = (θ/360) × πr²', note: 'θ in degrees' },
+      { tier: 'GCSE', name: 'Trigonometric Ratios', expr: 'sinθ = opp/hyp, cosθ = adj/hyp, tanθ = opp/adj', note: 'SOH CAH TOA' },
+      { tier: 'GCSE', name: 'Sine Rule', expr: 'a/sinA = b/sinB = c/sinC', note: '' },
+      { tier: 'GCSE', name: 'Cosine Rule', expr: 'a² = b² + c² - 2bc·cosA', note: '' },
+      { tier: 'GCSE', name: 'Area of a Triangle (Trig)', expr: 'A = ½ab·sinC', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Cylinder', expr: 'V = πr²h', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Sphere', expr: 'V = (4/3)πr³', note: '' },
+      { tier: 'GCSE', name: 'Surface Area of a Sphere', expr: 'A = 4πr²', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Cone', expr: 'V = (1/3)πr²h', note: '' },
+      { tier: 'GCSE', name: 'Curved Surface Area of a Cone', expr: 'A = πrl', note: 'l = slant height' },
+      { tier: 'GCSE', name: 'Volume of a Pyramid', expr: 'V = (1/3) × base area × height', note: '' },
+      { tier: 'GCSE', name: 'Volume of a Prism', expr: 'V = cross-sectional area × length', note: '' },
+      { tier: 'GCSE', name: 'Gradient of a Line', expr: 'm = (y₂ - y₁) / (x₂ - x₁)', note: '' },
+      { tier: 'GCSE', name: 'Equation of a Line', expr: 'y = mx + c', note: 'm = gradient, c = y-intercept' },
+      { tier: 'GCSE', name: 'Midpoint of a Line', expr: '((x₁+x₂)/2, (y₁+y₂)/2)', note: '' },
+      { tier: 'GCSE', name: 'Distance Between Two Points', expr: 'd = √((x₂-x₁)² + (y₂-y₁)²)', note: '' },
+      { tier: 'GCSE', name: 'Compound Interest', expr: 'A = P(1 + r/100)ⁿ', note: '' },
+      { tier: 'GCSE', name: 'nth Term (Arithmetic)', expr: 'aₙ = a + (n - 1)d', note: '' },
+      { tier: 'GCSE', name: 'nth Term (Geometric)', expr: 'aₙ = ar⁽ⁿ⁻¹⁾', note: '' },
+      { tier: 'GCSE', name: 'Sum of Arithmetic Series', expr: 'Sₙ = (n/2)(2a + (n-1)d)', note: '' },
+      { tier: 'GCSE', name: 'Sum of Geometric Series', expr: 'Sₙ = a(1-rⁿ)/(1-r)', note: 'r ≠ 1' },
+      { tier: 'GCSE', name: 'Independent Events (AND)', expr: 'P(A and B) = P(A) × P(B)', note: '' },
+      { tier: 'GCSE', name: 'Mutually Exclusive Events (OR)', expr: 'P(A or B) = P(A) + P(B)', note: '' },
+      { tier: 'GCSE', name: 'Standard Deviation', expr: 'σ = √(Σ(x - mean)² / n)', note: '' },
+      { tier: 'GCSE', name: 'Magnitude of a Vector', expr: '|v| = √(x² + y²)', note: '' },
+      { tier: 'GCSE', name: 'Upper and Lower Bounds', expr: 'bound = measured value ± ½ × unit of accuracy', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Differentiation (Power Rule)', expr: 'd/dx(xⁿ) = nxⁿ⁻¹', note: '' },
+      { tier: 'A-Level', name: 'Product Rule', expr: 'd/dx(uv) = u\'v + uv\'', note: '' },
+      { tier: 'A-Level', name: 'Quotient Rule', expr: "d/dx(u/v) = (u'v - uv') / v²", note: '' },
+      { tier: 'A-Level', name: 'Chain Rule', expr: 'dy/dx = (dy/du) × (du/dx)', note: '' },
+      { tier: 'A-Level', name: 'Integration (Power Rule)', expr: '∫xⁿ dx = xⁿ⁺¹/(n+1) + c', note: 'n ≠ -1' },
+      { tier: 'A-Level', name: 'Trapezium Rule (Approx. Integration)', expr: '∫y dx ≈ ½h[(y₀+yₙ) + 2(y₁+...+yₙ₋₁)]', note: '' },
+      { tier: 'A-Level', name: 'Pythagorean Trig Identity', expr: 'sin²θ + cos²θ = 1', note: '' },
+      { tier: 'A-Level', name: 'Tan Identity', expr: 'tanθ = sinθ / cosθ', note: '' },
+      { tier: 'A-Level', name: 'Double Angle (Sine)', expr: 'sin2θ = 2sinθcosθ', note: '' },
+      { tier: 'A-Level', name: 'Double Angle (Cosine)', expr: 'cos2θ = cos²θ - sin²θ', note: '' },
+      { tier: 'A-Level', name: 'Radians: Arc Length', expr: 'L = rθ', note: 'θ in radians' },
+      { tier: 'A-Level', name: 'Radians: Sector Area', expr: 'A = ½r²θ', note: 'θ in radians' },
+      { tier: 'A-Level', name: 'Laws of Logarithms', expr: 'log(ab) = log a + log b,  log(a/b) = log a - log b,  log(aⁿ) = n·log a', note: '' },
+      { tier: 'A-Level', name: 'Exponential Growth/Decay', expr: 'N = N₀e^(kt)', note: 'k negative for decay' },
+      { tier: 'A-Level', name: 'Binomial Coefficient', expr: 'ⁿCᵣ = n! / (r!(n-r)!)', note: '' },
+      { tier: 'A-Level', name: 'Binomial Expansion', expr: '(a+b)ⁿ = Σ ⁿCᵣ aⁿ⁻ʳbʳ', note: '' },
+      { tier: 'A-Level', name: 'Sum to Infinity (Geometric)', expr: 'S∞ = a / (1 - r)', note: '|r| < 1' },
+      { tier: 'A-Level', name: 'Vector Dot Product', expr: 'a·b = |a||b|cosθ', note: '' },
+      { tier: 'A-Level', name: 'Normal Distribution (Standardising)', expr: 'z = (x - μ) / σ', note: '' },
+      { tier: 'A-Level', name: 'Newton-Raphson Method', expr: 'xₙ₊₁ = xₙ - f(xₙ)/f\'(xₙ)', note: '' }
+    ],
+    physics: [
+      // --- KS3 ---
+      { tier: 'KS3', name: 'Speed', expr: 'v = d / t', note: '' },
+      { tier: 'KS3', name: 'Density', expr: 'ρ = m / V', note: '' },
+      { tier: 'KS3', name: 'Weight', expr: 'W = mg', note: 'g ≈ 9.8 m/s² on Earth' },
+      { tier: 'KS3', name: 'Pressure', expr: 'P = F / A', note: '' },
+      { tier: 'KS3', name: 'Work Done', expr: 'W = Fd', note: '' },
+      // --- GCSE ---
+      { tier: 'GCSE', name: 'Acceleration', expr: 'a = (v - u) / t', note: '' },
+      { tier: 'GCSE', name: "Newton's Second Law", expr: 'F = ma', note: '' },
+      { tier: 'GCSE', name: 'Momentum', expr: 'p = mv', note: '' },
+      { tier: 'GCSE', name: 'Impulse', expr: 'Impulse = FΔt = Δp', note: '' },
+      { tier: 'GCSE', name: 'Kinetic Energy', expr: 'KE = ½mv²', note: '' },
+      { tier: 'GCSE', name: 'Gravitational Potential Energy', expr: 'GPE = mgh', note: '' },
+      { tier: 'GCSE', name: 'Elastic Potential Energy', expr: 'Eₑ = ½kx²', note: '' },
+      { tier: 'GCSE', name: 'Power', expr: 'P = E / t', note: '' },
+      { tier: 'GCSE', name: 'Moments', expr: 'M = F × d', note: 'Turning effect of a force' },
+      { tier: 'GCSE', name: 'SUVAT: v = u + at', expr: 'v = u + at', note: '' },
+      { tier: 'GCSE', name: 'SUVAT: s = ut + ½at²', expr: 's = ut + ½at²', note: '' },
+      { tier: 'GCSE', name: 'SUVAT: v² = u² + 2as', expr: 'v² = u² + 2as', note: '' },
+      { tier: 'GCSE', name: "Ohm's Law", expr: 'V = IR', note: '' },
+      { tier: 'GCSE', name: 'Electrical Power', expr: 'P = VI', note: '' },
+      { tier: 'GCSE', name: 'Charge', expr: 'Q = It', note: '' },
+      { tier: 'GCSE', name: 'Energy Transferred (Electrical)', expr: 'E = QV', note: '' },
+      { tier: 'GCSE', name: 'Resistors in Series', expr: 'R_total = R₁ + R₂ + ...', note: '' },
+      { tier: 'GCSE', name: 'Resistors in Parallel', expr: '1/R_total = 1/R₁ + 1/R₂ + ...', note: '' },
+      { tier: 'GCSE', name: 'Wave Speed', expr: 'v = fλ', note: '' },
+      { tier: 'GCSE', name: 'Frequency-Period Relation', expr: 'f = 1 / T', note: '' },
+      { tier: 'GCSE', name: 'Refractive Index (Basic)', expr: 'n = sinθᵢ / sinθᵣ', note: '' },
+      { tier: 'GCSE', name: "Hooke's Law", expr: 'F = kx', note: '' },
+      { tier: 'GCSE', name: 'Efficiency', expr: '(useful output / total input) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Specific Heat Capacity', expr: 'Q = mcΔT', note: '' },
+      { tier: 'GCSE', name: 'Specific Latent Heat', expr: 'Q = mL', note: '' },
+      { tier: 'GCSE', name: 'Nuclear Decay (Activity)', expr: 'A = ΔN / Δt', note: '' },
+      { tier: 'GCSE', name: 'Centripetal Force', expr: 'F = mv² / r', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Pressure in a Fluid', expr: 'P = ρgh', note: '' },
+      { tier: 'A-Level', name: 'Angular Velocity', expr: 'ω = v/r = 2π/T', note: '' },
+      { tier: 'A-Level', name: "Newton's Law of Gravitation", expr: 'F = Gm₁m₂ / r²', note: '' },
+      { tier: 'A-Level', name: 'Gravitational Field Strength', expr: 'g = GM / r²', note: '' },
+      { tier: 'A-Level', name: "Coulomb's Law", expr: 'F = kq₁q₂ / r²', note: '' },
+      { tier: 'A-Level', name: 'Electric Field Strength', expr: 'E = F / Q', note: '' },
+      { tier: 'A-Level', name: 'Capacitance', expr: 'C = Q / V', note: '' },
+      { tier: 'A-Level', name: 'Energy Stored in a Capacitor', expr: 'E = ½QV = ½CV²', note: '' },
+      { tier: 'A-Level', name: 'RC Time Constant', expr: 'τ = RC', note: '' },
+      { tier: 'A-Level', name: 'Simple Harmonic Motion (Acceleration)', expr: 'a = -ω²x', note: '' },
+      { tier: 'A-Level', name: 'SHM Period (Mass-Spring)', expr: 'T = 2π√(m/k)', note: '' },
+      { tier: 'A-Level', name: 'Photon Energy', expr: 'E = hf', note: 'h = Planck constant' },
+      { tier: 'A-Level', name: 'De Broglie Wavelength', expr: 'λ = h / p', note: '' },
+      { tier: 'A-Level', name: 'Mass-Energy Equivalence', expr: 'E = mc²', note: '' },
+      { tier: 'A-Level', name: 'Radioactive Decay', expr: 'N = N₀e^(-λt)', note: '' },
+      { tier: 'A-Level', name: 'Half-Life (Decay Constant)', expr: 't½ = ln2 / λ', note: '' },
+      { tier: 'A-Level', name: 'Snell\'s Law', expr: 'n₁sinθ₁ = n₂sinθ₂', note: '' },
+      { tier: 'A-Level', name: 'Force on a Current-Carrying Wire', expr: 'F = BIL', note: '' },
+      { tier: 'A-Level', name: 'Force on a Moving Charge', expr: 'F = qvB', note: '' },
+      { tier: 'A-Level', name: "Faraday's Law (Induced EMF)", expr: 'ε = -ΔΦ / Δt', note: '' },
+      { tier: 'A-Level', name: 'Transformer Equation', expr: 'Vₚ/Vₛ = Nₚ/Nₛ', note: '' }
+    ],
+    chemistry: [
+      // --- KS3/GCSE basics ---
+      { tier: 'GCSE', name: 'Moles', expr: 'n = m / M', note: 'm = mass, M = molar mass' },
+      { tier: 'GCSE', name: 'Relative Formula Mass', expr: 'Mr = sum of relative atomic masses', note: '' },
+      { tier: 'GCSE', name: 'Moles from Gas Volume (RTP)', expr: 'n = V(dm³) / 24', note: 'At room temperature and pressure' },
+      { tier: 'GCSE', name: 'Concentration', expr: 'c = n / V', note: '' },
+      { tier: 'GCSE', name: 'Dilution Formula', expr: 'c₁V₁ = c₂V₂', note: '' },
+      { tier: 'GCSE', name: 'Titration (Mole Ratio)', expr: 'c₁V₁ / n₁ = c₂V₂ / n₂', note: '' },
+      { tier: 'GCSE', name: 'Percentage Yield', expr: '(actual / theoretical) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Atom Economy', expr: '(Mr of desired product / total Mr of products) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Percentage Composition', expr: '(mass of element / Mr) × 100%', note: '' },
+      { tier: 'GCSE', name: 'Rate of Reaction', expr: 'rate = amount used or made / time', note: '' },
+      { tier: 'GCSE', name: 'pH', expr: 'pH = -log[H⁺]', note: '' },
+      { tier: 'GCSE', name: 'Energy Change', expr: 'q = mcΔT', note: 'c = specific heat capacity' },
+      { tier: 'GCSE', name: 'Bond Energy Calculations', expr: 'ΔH = (energy to break bonds) - (energy released forming bonds)', note: '' },
+      // --- A-Level ---
+      { tier: 'A-Level', name: 'Ideal Gas Law', expr: 'PV = nRT', note: '' },
+      { tier: 'A-Level', name: 'Rate Equation', expr: 'rate = k[A]ᵐ[B]ⁿ', note: '' },
+      { tier: 'A-Level', name: 'Arrhenius Equation', expr: 'k = Ae^(-Ea/RT)', note: '' },
+      { tier: 'A-Level', name: 'Equilibrium Constant (Kc)', expr: 'Kc = [products]/[reactants]', note: 'raised to stoichiometric powers' },
+      { tier: 'A-Level', name: 'Ionic Product of Water', expr: 'Kw = [H⁺][OH⁻] = 10⁻¹⁴', note: 'at 25°C' },
+      { tier: 'A-Level', name: 'pKa', expr: 'pKa = -log(Ka)', note: '' },
+      { tier: 'A-Level', name: 'Henderson-Hasselbalch Equation', expr: 'pH = pKa + log([A⁻]/[HA])', note: '' },
+      { tier: 'A-Level', name: "Faraday's Law (Electrolysis)", expr: 'moles of electrons = Q / F', note: 'Q = It' },
+      { tier: 'A-Level', name: 'Standard Cell Potential', expr: 'E°cell = E°cathode - E°anode', note: '' },
+      { tier: 'A-Level', name: 'Gibbs Free Energy', expr: 'ΔG = ΔH - TΔS', note: '' }
+    ],
+    biology: [
+      { tier: 'GCSE', name: 'Magnification', expr: 'magnification = image size / actual size', note: '' },
+      { tier: 'GCSE', name: 'Rate of Reaction/Process', expr: 'rate = 1 / time', note: '' },
+      { tier: 'GCSE', name: 'Surface Area to Volume Ratio', expr: 'SA:V = surface area / volume', note: 'Higher ratio = faster exchange' },
+      { tier: 'GCSE', name: 'Percentage Change', expr: '((new - original) / original) × 100%', note: 'Used in osmosis/diffusion practicals' },
+      { tier: 'A-Level', name: 'Cardiac Output', expr: 'CO = stroke volume × heart rate', note: '' },
+      { tier: 'A-Level', name: 'Population Estimate (Quadrat Sampling)', expr: '(total area / quadrat area) × mean count per quadrat', note: '' },
+      { tier: 'A-Level', name: 'Mark-Release-Recapture (Lincoln Index)', expr: 'population = (n₁ × n₂) / n₃', note: '' },
+      { tier: 'A-Level', name: 'Body Mass Index', expr: 'BMI = mass (kg) / height (m)²', note: '' }
+    ]
+  };
+
+  const FORMULA_SUBJECT_LABEL = { maths: 'Maths', physics: 'Physics', chemistry: 'Chemistry', biology: 'Biology' };
+  const TIER_CLASS = { 'KS3': 'tier-ks3', 'GCSE': 'tier-gcse', 'A-Level': 'tier-alevel' };
+  let currentFormulaTab = 'maths';
+
+  function formulaCardHtml(f, showSubject){
+    return `
+      <div class="formula-card">
+        <div class="formula-tags">
+          ${showSubject ? `<div class="formula-subject-tag">${FORMULA_SUBJECT_LABEL[f.subject]}</div>` : ''}
+          <div class="formula-tier-tag ${TIER_CLASS[f.tier] || ''}">${f.tier}</div>
+        </div>
+        <div class="formula-name">${escapeHtml(f.name)}</div>
+        <div class="formula-expr">${escapeHtml(f.expr)}</div>
+        ${f.note ? `<div class="formula-note">${escapeHtml(f.note)}</div>` : ''}
+      </div>
+    `;
+  }
+
+  function renderFormulas(){
+    const query = document.getElementById('formulaSearch').value.trim().toLowerCase();
+    const grid = document.getElementById('formulaGrid');
+
+    if(query){
+      let results = [];
+      Object.entries(FORMULAS).forEach(([subject, list]) => {
+        list.forEach(f => {
+          if(f.name.toLowerCase().includes(query) || f.expr.toLowerCase().includes(query) || f.note.toLowerCase().includes(query)){
+            results.push({ ...f, subject });
+          }
+        });
+      });
+      grid.innerHTML = results.length
+        ? results.map(f => formulaCardHtml(f, true)).join('')
+        : '<div class="placeholder-note">No formulas match that search.</div>';
+    }else{
+      grid.innerHTML = FORMULAS[currentFormulaTab].map(f => formulaCardHtml(f, false)).join('');
+    }
+  }
+
+  function setFormulaTab(tab){
+    currentFormulaTab = tab;
+    document.getElementById('formulaTabMaths').classList.toggle('active', tab === 'maths');
+    document.getElementById('formulaTabPhysics').classList.toggle('active', tab === 'physics');
+    document.getElementById('formulaTabChemistry').classList.toggle('active', tab === 'chemistry');
+    document.getElementById('formulaTabBiology').classList.toggle('active', tab === 'biology');
+    document.getElementById('formulaSearch').value = '';
+    renderFormulas();
+  }
+
+  setFormulaTab('maths');
+
+  /* ---- Vocabulary Builder ---- */
+  let vocabList = [];
+
+  async function loadVocab(){
+    try{
+      const res = await window.storage.get('vocab-list', false);
+      vocabList = res && res.value ? JSON.parse(res.value) : [];
+    }catch(e){ vocabList = []; }
+    renderVocab();
+  }
+
+  async function saveVocabList(){
+    try{ await window.storage.set('vocab-list', JSON.stringify(vocabList), false); }catch(e){}
+  }
+
+  function renderVocab(){
+    const grid = document.getElementById('vocabGrid');
+    animateNumber(document.getElementById('vocabCountNum'), vocabList.length, { duration: 400 });
+    if(vocabList.length === 0){
+      grid.innerHTML = '<div class="placeholder-note">No words saved yet — generate some above.</div>';
+      return;
+    }
+    grid.innerHTML = vocabList.slice().reverse().map((v, revIdx) => {
+      const i = vocabList.length - 1 - revIdx;
+      return `
+        <div class="vocab-card">
+          <div class="vocab-del" onclick="deleteVocabWord(${i})">&times;</div>
+          <div class="vocab-word">${escapeHtml(v.word)}</div>
+          <div class="vocab-def">${escapeHtml(v.definition)}</div>
+          <div class="vocab-example">"${escapeHtml(v.example)}"</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function generateVocab(){
+    const topicInput = document.getElementById('vocabTopic');
+    const topic = topicInput.value.trim() || 'general advanced vocabulary';
+    const feedback = document.getElementById('vocabFeedback');
+    const btn = document.getElementById('vocabGenBtn');
+
+    btn.disabled = true;
+    feedback.textContent = '';
+    const grid = document.getElementById('vocabGrid');
+    const skeletonCard = `
+      <div class="vocab-card">
+        <div class="skeleton" style="width:45%;height:18px;margin-bottom:10px;"></div>
+        <div class="skeleton" style="width:92%;margin-bottom:6px;"></div>
+        <div class="skeleton" style="width:68%;"></div>
+      </div>
+    `;
+    grid.insertAdjacentHTML('afterbegin', skeletonCard.repeat(2));
+
+    const existingWords = vocabList.map(v => v.word).slice(-40).join(', ');
+    const avoidClause = existingWords ? ` Do not repeat any of these already-saved words: ${existingWords}.` : '';
+    const prompt = `Give me 5 useful vocabulary words related to "${topic}". For each, provide the word, a clear simple definition, and one example sentence using it.${avoidClause} Respond with ONLY a raw JSON array, no markdown fences, no explanation, in exactly this shape: [{"word":"<word>","definition":"<definition>","example":"<example sentence>"}, ...]`;
+
+    try{
+      const text = await callClaudeText(prompt, 700);
+      const match = text.match(/\[[\s\S]*\]/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      parsed.forEach(entry => {
+        if(entry.word && entry.definition){
+          vocabList.push({ word: entry.word, definition: entry.definition, example: entry.example || '' });
+        }
+      });
+      await saveVocabList();
+      renderVocab();
+      feedback.textContent = '';
+    }catch(e){
+      feedback.textContent = "Something went wrong generating words — try again.";
+    }
+    btn.disabled = false;
+  }
+
+  function deleteVocabWord(i){
+    vocabList.splice(i, 1);
+    saveVocabList();
+    renderVocab();
+  }
+
+  let vocabClearConfirming = false;
+  let vocabClearTimeout = null;
+
+  async function clearVocab(){
+    const btn = document.getElementById('vocabClearBtn');
+    if(vocabList.length === 0) return;
+
+    if(!vocabClearConfirming){
+      vocabClearConfirming = true;
+      btn.textContent = 'Click again to confirm';
+      vocabClearTimeout = setTimeout(() => {
+        vocabClearConfirming = false;
+        btn.textContent = 'Clear All';
+      }, 3000);
+      return;
+    }
+
+    clearTimeout(vocabClearTimeout);
+    vocabClearConfirming = false;
+    btn.textContent = 'Clear All';
+    vocabList = [];
+    await saveVocabList();
+    renderVocab();
+  }
+
+  document.getElementById('vocabTopic').addEventListener('keydown', e => {
+    if(e.key === 'Enter') generateVocab();
+  });
+
+  loadVocab();
+
+</script>
+
+<script>
+  /* ---- Clock widget ---- */
+  function updateClock(){
+    const now = new Date();
+    document.getElementById('clockTime').textContent = now.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+    document.getElementById('clockDate').textContent = now.toLocaleDateString(undefined, {weekday:'long', day:'numeric', month:'long'});
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  /* ---- Weather widget ---- */
+  const WEATHER_CODES = {
+    0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+    45: 'Fog', 48: 'Fog',
+    51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle',
+    61: 'Light rain', 63: 'Rain', 65: 'Heavy rain',
+    71: 'Light snow', 73: 'Snow', 75: 'Heavy snow',
+    80: 'Rain showers', 81: 'Rain showers', 82: 'Violent showers',
+    95: 'Thunderstorm', 96: 'Thunderstorm', 99: 'Thunderstorm'
+  };
+
+  async function fetchWeather(){
+    try{
+      // London coordinates — swap these if you'd rather it show a different city
+      const lat = 51.5072, lon = -0.1276;
+      const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`);
+      const data = await response.json();
+      const temp = data.current_weather.temperature;
+      const code = data.current_weather.weathercode;
+      animateNumber(document.getElementById('weatherTemp'), Math.round(temp), { suffix: '°C' });
+      document.getElementById('weatherDesc').textContent = WEATHER_CODES[code] || 'Weather update';
+    }catch(e){
+      document.getElementById('weatherTemp').textContent = '--°';
+      document.getElementById('weatherDesc').textContent = "Couldn't load weather";
+    }
+  }
+  fetchWeather();
+
+  /* ---- CS fact rotator (live via AI) ---- */
+  const FALLBACK_FACTS = [
+    "The first computer bug was an actual moth, found stuck in a Harvard Mark II relay in 1947.",
+    "The QWERTY keyboard layout was designed to slow typists down and stop mechanical typewriters jamming.",
+    "The term 'debugging' predates computers — Thomas Edison used it to describe fixing his inventions in the 1870s.",
+    "A single Google search uses more computing power than the entire Apollo 11 moon landing.",
+    "The first computer programmer is widely considered to be Ada Lovelace, writing algorithms for Babbage's Analytical Engine in the 1840s.",
+    "Python is named after Monty Python's Flying Circus, not the snake.",
+    "The '@' symbol was chosen for email addresses in 1971 simply because it was unlikely to appear in anyone's name.",
+    "There are more possible chess games than atoms in the observable universe — roughly 10^120 versus 10^80.",
+    "The first 1GB hard drive, released in 1980, weighed about 250kg and cost $40,000.",
+    "Binary search is so efficient it can find a single item in a billion sorted records in about 30 comparisons.",
+    "The word 'algorithm' comes from the name of the 9th-century Persian mathematician Al-Khwarizmi.",
+    "More than half of the internet's traffic today comes from automated bots, not humans."
+  ];
+
+  let shownFacts = [];
+  let activeEl = null;
+  let inactiveEl = null;
+
+  async function generateFact(){
+    try{
+      const avoidList = shownFacts.slice(-15).join(' | ');
+      const prompt = `Give me one interesting, true, concise computer science fact — 1 to 2 sentences, under 200 characters. Respond with ONLY the fact text, no preamble, no quotes, no markdown formatting.${avoidList ? " Do not repeat or closely resemble any of these already-shown facts: " + avoidList : ""}`;
+      const text = await callGeminiText(prompt, 150);
+      return text || null;
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function nextFactText(){
+    const generated = await generateFact();
+    const fact = generated || FALLBACK_FACTS[Math.floor(Math.random() * FALLBACK_FACTS.length)];
+    shownFacts.push(fact);
+    if(shownFacts.length > 20) shownFacts.shift();
+    return fact;
+  }
+
+  async function initFacts(){
+    activeEl = document.getElementById('factA');
+    inactiveEl = document.getElementById('factB');
+    const first = await nextFactText();
+    activeEl.textContent = first;
+    activeEl.classList.add('shown');
+  }
+
+  async function rotateFact(){
+    const fact = await nextFactText(); // generated while the current fact stays fully visible
+    inactiveEl.textContent = fact;
+    void inactiveEl.offsetWidth; // force reflow so the fade-in transition triggers
+    inactiveEl.classList.add('shown');
+    activeEl.classList.remove('shown'); // old and new cross-fade at the same time, no gap
+    [activeEl, inactiveEl] = [inactiveEl, activeEl];
+  }
+
+  initFacts().then(() => {
+    setInterval(rotateFact, 30000);
+  });
+
+  /* ---- Digital rain background (Welcome hero only, kept subtle) ---- */
+  function initMatrixRain(){
+    const canvas = document.getElementById('matrixCanvas');
+    if(!canvas) return;
+    if(window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const ctx = canvas.getContext('2d');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const fontSize = 15;
+    let columns, drops;
+
+    function resize(){
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      columns = Math.max(1, Math.floor(canvas.width / fontSize));
+      drops = Array.from({ length: columns }, () => Math.floor(Math.random() * -50));
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function draw(){
+      ctx.fillStyle = 'rgba(11, 21, 48, 0.13)'; // matches --ink — fades the trail rather than hard-clearing
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#6FE0A0'; // reuses the site's existing signal-green accent, not a random neon
+      ctx.font = fontSize + 'px monospace';
+
+      for(let i = 0; i < drops.length; i++){
+        const char = chars[Math.floor(Math.random() * chars.length)];
+        ctx.fillText(char, i * fontSize, drops[i] * fontSize);
+        if(drops[i] * fontSize > canvas.height && Math.random() > 0.975){
+          drops[i] = 0;
+        }
+        drops[i]++;
+      }
+    }
+    setInterval(draw, 55);
+  }
+  initMatrixRain();
+
+  /* ---- Cursor-following glow on hub cards ---- */
+  function initHubCardGlow(){
+    document.querySelectorAll('.hub-card').forEach(card => {
+      card.addEventListener('mousemove', e => {
+        const rect = card.getBoundingClientRect();
+        card.style.setProperty('--mx', (e.clientX - rect.left) + 'px');
+        card.style.setProperty('--my', (e.clientY - rect.top) + 'px');
+      });
+    });
+  }
+  function updateFavicon(letter){
+    const safeLetter = escapeHtml((letter || 'S').toUpperCase().slice(0, 1));
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+      <rect width="100" height="100" rx="18" fill="#0B1530"/>
+      <rect x="6" y="6" width="88" height="88" rx="16" fill="#16234F"/>
+      <text x="50" y="69" font-family="Arial, sans-serif" font-weight="700" font-size="58" fill="#E0AC3F" text-anchor="middle">${safeLetter}</text>
+    </svg>`;
+    const dataUri = 'data:image/svg+xml,' + encodeURIComponent(svg);
+
+    let link = document.querySelector("link[rel~='icon']");
+    if(!link){
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.href = dataUri;
+  }
+
+  initHubCardGlow();
+  loadConversationList();
+  loadMemoryNotes();
+  applyChatModeToUI();
+  ensureDmKeyPair();
+
+  if(window.__GUEST_USERNAME__){
+    document.title = window.__GUEST_USERNAME__ + "'s Hub";
+    updateFavicon(window.__GUEST_USERNAME__);
+    document.getElementById('statusText').textContent = 'System Ready - Guest Mode Initiated';
+    typeWelcomeGuestSequence(window.__GUEST_USERNAME__);
+    reportGuestActivity(currentActiveView);
+    setInterval(() => reportGuestActivity(currentActiveView), 8000);
+
+    if(window.__GUEST_ALLOWED_HUBS__ && window.__GUEST_ALLOWED_HUBS__.length > 0){
+      document.querySelectorAll('#view-home .hub-card[data-hub]').forEach(card => {
+        if(window.__GUEST_ALLOWED_HUBS__.indexOf(card.dataset.hub) === -1){
+          card.style.display = 'none';
+        }
+      });
+    }
+  }else{
+    updateFavicon('S');
+    typeTitle('welcome');
+  }
+</script>
+
 </body>
-</html>`;
-}
+</html>
