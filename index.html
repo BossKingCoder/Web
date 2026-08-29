@@ -345,15 +345,24 @@
   .chat-sidebar{
     width:220px;flex-shrink:0;background:var(--panel);border:1px solid var(--line);
     border-radius:8px;padding:14px;max-height:640px;overflow-y:auto;
+    display:flex;flex-direction:column;
   }
+  .chat-sidebar-new-row{display:flex;gap:6px;margin-bottom:14px;}
   .new-chat-btn{
-    width:100%;background:var(--brass);color:var(--ink);border:none;
+    flex:1;background:var(--brass);color:var(--ink);border:none;
     padding:10px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
-    margin-bottom:14px;transition:background .2s cubic-bezier(0.16,1,0.3,1);
+    transition:background .2s cubic-bezier(0.16,1,0.3,1);
   }
   .new-chat-btn:hover{background:var(--brass-soft);}
+  .new-project-btn{
+    background:var(--panel-raised);color:var(--slate);border:1px solid var(--line);
+    padding:10px 12px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .new-project-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+
   .chat-conv-item{
-    padding:10px 12px;border-radius:6px;margin-bottom:6px;cursor:pointer;
+    padding:9px 10px;border-radius:6px;margin-bottom:2px;cursor:pointer;
     font-size:12.5px;color:var(--slate);border:1px solid transparent;
     display:flex;align-items:center;justify-content:space-between;gap:6px;
     transition:background .15s ease, border-color .15s ease, color .15s ease;
@@ -361,13 +370,42 @@
   .chat-conv-item:hover{background:var(--panel-raised);color:#F5F1E8;}
   .chat-conv-item.active{background:var(--panel-raised);border-color:var(--brass-dim);color:#F5F1E8;}
   .chat-conv-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;}
-  .chat-conv-item-actions{display:none;flex-shrink:0;gap:2px;}
-  .chat-conv-item:hover .chat-conv-item-actions{display:flex;}
-  .chat-conv-item-actions button{
-    background:none;border:none;cursor:pointer;font-size:12px;padding:2px 4px;
-    opacity:0.7;transition:opacity .15s ease;
+
+  .chat-conv-overflow-wrapper{position:relative;flex-shrink:0;}
+  .chat-conv-overflow-btn{
+    display:none;background:none;border:none;color:var(--slate);cursor:pointer;
+    font-size:14px;padding:2px 5px;opacity:0.75;border-radius:4px;
+    transition:opacity .15s ease, background .15s ease;
   }
-  .chat-conv-item-actions button:hover{opacity:1;}
+  .chat-conv-item:hover .chat-conv-overflow-btn{display:block;}
+  .chat-conv-overflow-btn:hover{opacity:1;background:rgba(255,255,255,0.08);}
+  .chat-conv-overflow-menu{
+    display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:20;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    min-width:150px;padding:6px;flex-direction:column;gap:2px;
+  }
+  .chat-conv-overflow-menu.visible{display:flex;}
+  .chat-conv-overflow-menu button{
+    background:none;border:none;color:var(--slate);text-align:left;padding:8px 10px;
+    border-radius:5px;font-size:12.5px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-conv-overflow-menu button:hover{background:var(--panel-raised);color:#F5F1E8;}
+
+  .chat-project-group{margin-bottom:4px;}
+  .chat-project-header{
+    display:flex;align-items:center;justify-content:space-between;gap:6px;
+    padding:8px 6px;cursor:pointer;color:var(--slate-dim);font-size:11px;
+    text-transform:uppercase;letter-spacing:.05em;font-weight:600;
+  }
+  .chat-project-header:hover{color:#F5F1E8;}
+  .chat-project-header-left{display:flex;align-items:center;gap:6px;overflow:hidden;}
+  .chat-project-header-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .chat-project-caret{transition:transform .15s ease;flex-shrink:0;}
+  .chat-project-group.collapsed .chat-project-caret{transform:rotate(-90deg);}
+  .chat-project-group.collapsed .chat-project-items{display:none;}
+  .chat-project-items{padding-left:4px;}
+
   .chat-search-input{
     width:100%;box-sizing:border-box;background:var(--ink);border:1px solid var(--line);
     color:#F5F1E8;padding:8px 10px;border-radius:6px;font-size:12px;margin-bottom:10px;
@@ -393,6 +431,27 @@
     transition:background .15s ease, color .15s ease;
   }
   .chat-memory-forget-btn:hover{background:var(--accent-red);color:#F5F1E8;}
+
+  .chat-sidebar-profile{
+    display:flex;align-items:center;gap:10px;margin-top:auto;padding-top:14px;
+    border-top:1px solid var(--line);
+  }
+  .chat-sidebar-avatar{
+    width:28px;height:28px;border-radius:50%;flex-shrink:0;
+    background:var(--brass);color:var(--ink);font-weight:700;font-size:13px;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .chat-sidebar-name{font-size:12.5px;color:var(--slate);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+  .move-to-project-list{display:flex;flex-direction:column;gap:6px;margin-bottom:16px;max-height:220px;overflow-y:auto;}
+  .move-to-project-option{
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:6px;
+    padding:10px 12px;text-align:left;cursor:pointer;color:#F5F1E8;font-size:13px;
+    transition:border-color .15s ease;
+  }
+  .move-to-project-option:hover{border-color:var(--brass-dim);}
+  .move-to-project-option.current{border-color:var(--brass);background:rgba(224,172,63,0.1);}
+
   .chat-main-area{flex:1;min-width:0;}
   .view-head{margin-bottom:22px;}
   .view-head h2{font-size:34px;margin-bottom:8px;}
@@ -415,6 +474,27 @@
   }
   .mode-toggle-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
   .mode-toggle-btn.direct-mode{border-color:var(--brass);color:#F5F1E8;background:rgba(224,172,63,0.12);}
+
+  .chat-overflow-wrapper{position:relative;}
+  .chat-overflow-btn{
+    background:var(--panel);border:1px solid var(--line);color:var(--slate);
+    width:34px;height:34px;border-radius:6px;font-size:16px;cursor:pointer;margin-top:4px;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .chat-overflow-btn:hover{border-color:var(--brass-dim);color:#F5F1E8;}
+  .chat-overflow-menu{
+    display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:20;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    min-width:150px;padding:6px;flex-direction:column;gap:2px;
+  }
+  .chat-overflow-menu.visible{display:flex;}
+  .chat-overflow-menu button{
+    background:none;border:none;color:var(--slate);text-align:left;padding:8px 10px;
+    border-radius:5px;font-size:13px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+    transition:background .15s ease, color .15s ease;
+  }
+  .chat-overflow-menu button:hover{background:var(--panel-raised);color:#F5F1E8;}
+
   .placeholder-note{
     font-size:13px;color:var(--slate-dim);font-family:'IBM Plex Mono',monospace;
     border:1px dashed var(--line);border-radius:8px;padding:20px;text-align:center;
@@ -461,10 +541,6 @@
     display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.02em;
     background:rgba(111,224,160,0.12);color:#6FE0A0;border:1px solid rgba(111,224,160,0.35);
     padding:2px 8px;border-radius:20px;vertical-align:middle;margin-left:6px;
-  }
-  .e2ee-note{
-    font-size:12px;color:#6FE0A0;background:rgba(111,224,160,0.08);border:1px solid rgba(111,224,160,0.25);
-    padding:8px 12px;border-radius:6px;margin-top:10px;line-height:1.5;
   }
   .hub-icon svg{
     width:22px;height:22px;fill:none;stroke:var(--brass-soft);
@@ -551,6 +627,28 @@
     border-radius:6px;font-weight:600;font-size:12px;cursor:pointer;transition:background .15s ease;
   }
   .doc-card-btn:hover{background:var(--brass-soft);}
+
+  .dm-layout{display:flex;gap:20px;flex-wrap:wrap;}
+  .dm-sidebar{flex:0 0 200px;min-width:180px;}
+  .dm-main{flex:1;min-width:280px;}
+  .dm-conversation-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+  .e2ee-badge-inline{font-size:16px;cursor:default;margin-left:6px;opacity:0.85;vertical-align:middle;}
+  .call-status-panel{display:flex;flex-direction:column;}
+
+  .call-panel-inner{
+    background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;
+    padding:14px;display:flex;justify-content:space-between;align-items:center;
+    flex-wrap:wrap;gap:10px;margin-bottom:14px;
+  }
+  #incomingCallBanner.call-panel-inner{border-left:3px solid var(--accent-pink);}
+  #activeCallBar.call-panel-inner{border-left:3px solid var(--signal);}
+  .video-call-panel{position:relative;background:#000;border-radius:8px;margin-bottom:14px;overflow:hidden;}
+
+  .dm-log{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;
+  }
+  .dm-typing-indicator{font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;}
 
   .fullscreen-toggle-btn{
     position:absolute;top:10px;right:10px;z-index:5;
@@ -1103,12 +1201,29 @@
 <div class="view" id="view-chat">
   <main class="chat-with-sidebar">
     <div class="chat-sidebar">
-      <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+      <div class="chat-sidebar-new-row">
+        <button class="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+        <button class="new-project-btn" onclick="createNewProject()" title="New Project">+ Project</button>
+      </div>
       <input type="text" id="chatSearchInput" class="chat-search-input" placeholder="Search chats..." oninput="renderConversationList()">
       <div class="chat-conv-list" id="chatConvList"></div>
       <div class="chat-memory-toggle" onclick="toggleMemoryViewer()">What I remember about you</div>
       <div class="chat-memory-viewer" id="chatMemoryViewer"></div>
+      <div class="chat-sidebar-profile">
+        <div class="chat-sidebar-avatar" id="chatSidebarAvatar"></div>
+        <div class="chat-sidebar-name" id="chatSidebarName"></div>
+      </div>
     </div>
+
+    <div id="moveToProjectModal" class="call-choice-overlay" style="display:none;">
+      <div class="call-choice-box">
+        <div class="call-choice-title">Move chat</div>
+        <div class="call-choice-sub">Choose a project, or remove it from one.</div>
+        <div id="moveToProjectList" class="move-to-project-list"></div>
+        <button class="call-choice-cancel" onclick="closeMoveToProjectModal()">Cancel</button>
+      </div>
+    </div>
+
     <div class="chat-main-area">
       <div class="view-head chat-head">
         <div>
@@ -1117,8 +1232,13 @@
         </div>
         <div class="chat-head-actions">
           <button id="modeToggleBtn" class="mode-toggle-btn" onclick="toggleChatMode()">Mode: Walk me through it</button>
-          <button class="clear-btn" onclick="exportCurrentConversation()">Export</button>
-          <button class="clear-btn" onclick="deleteCurrentChat()">Delete chat</button>
+          <div class="chat-overflow-wrapper">
+            <button class="chat-overflow-btn" onclick="toggleChatOverflowMenu()" title="More options">⋮</button>
+            <div id="chatOverflowMenu" class="chat-overflow-menu">
+              <button onclick="exportCurrentConversation();closeChatOverflowMenu();">Export chat</button>
+              <button onclick="deleteCurrentChat();closeChatOverflowMenu();">Delete chat</button>
+            </div>
+          </div>
         </div>
       </div>
       <div id="chatlog"></div>
@@ -1875,17 +1995,16 @@
 <div class="view" id="view-directmessages">
   <main>
     <div class="view-head">
-      <h2>Direct Messages</h2>
+      <h2>Direct Messages <span class="e2ee-badge-inline" title="End-to-end encrypted — messages are scrambled on your device before sending, so not even this site's own server can read them.">🔒</span></h2>
       <div class="view-sub" id="dmConnectionStatus">Connecting...</div>
-      <div class="e2ee-note">🔒 End-to-end encrypted — messages are scrambled on your device before sending, so not even this site's own server can read them.</div>
     </div>
-    <div style="display:flex;gap:20px;flex-wrap:wrap;">
-      <div style="flex:0 0 200px;min-width:180px;">
+    <div class="dm-layout">
+      <div class="dm-sidebar">
         <div class="cs-label" style="margin-bottom:10px;">Online now</div>
         <div id="dmContactList"></div>
       </div>
-      <div style="flex:1;min-width:280px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div class="dm-main">
+        <div class="dm-conversation-header">
           <div class="cs-label" id="dmConversationHeader" style="margin-bottom:0;">Pick someone online to start a conversation.</div>
           <button class="clear-btn" id="voiceCallBtn" onclick="openCallChoiceModal()" style="display:none;">Call</button>
         </div>
@@ -1908,46 +2027,48 @@
           </div>
         </div>
 
-        <div id="incomingCallBanner" style="display:none;background:var(--panel-raised);border:1px solid var(--accent-pink);border-radius:8px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-          <div id="incomingCallText" style="font-size:14px;color:#F5F1E8;"></div>
-          <div style="display:flex;gap:8px;">
-            <button class="timer-btn primary" onclick="acceptVoiceCall()">Accept</button>
-            <button class="timer-btn" onclick="rejectVoiceCall()">Decline</button>
+        <div id="callStatusPanel" class="call-status-panel">
+          <div id="incomingCallBanner" class="call-panel-inner" style="display:none;">
+            <div id="incomingCallText" style="font-size:14px;color:#F5F1E8;"></div>
+            <div style="display:flex;gap:8px;">
+              <button class="timer-btn primary" onclick="acceptVoiceCall()">Accept</button>
+              <button class="timer-btn" onclick="rejectVoiceCall()">Decline</button>
+            </div>
+          </div>
+
+          <div id="activeCallBar" class="call-panel-inner" style="display:none;">
+            <div id="activeCallText" style="font-size:14px;color:var(--signal);"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="timer-btn" id="muteCallBtn" onclick="toggleMuteVoiceCall()">Mute</button>
+              <button class="timer-btn" id="cameraCallBtn" onclick="toggleCameraVoiceCall()" style="display:none;">Camera Off</button>
+              <button class="timer-btn" id="screenShareBtn" onclick="toggleScreenShare()">Share Screen</button>
+              <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+            </div>
+          </div>
+
+          <div id="videoCallArea" class="video-call-panel" style="display:none;">
+            <video id="remoteCallVideo" autoplay playsinline style="width:100%;display:block;max-height:360px;object-fit:cover;background:#000;"></video>
+            <video id="localCallVideo" autoplay playsinline muted style="position:absolute;bottom:10px;right:10px;width:110px;border-radius:6px;border:2px solid var(--panel-raised);object-fit:cover;"></video>
+            <div id="callReactionsOverlay" style="position:absolute;inset:0;pointer-events:none;overflow:hidden;"></div>
+            <button id="fullscreenCallBtn" class="fullscreen-toggle-btn" onclick="toggleCallFullscreen()" title="Fullscreen">⛶</button>
+            <div style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px;">
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👍')">👍</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('❤️')">❤️</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('😂')">😂</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('🎉')">🎉</button>
+              <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👏')">👏</button>
+            </div>
+            <div class="fullscreen-only-controls">
+              <button class="timer-btn" onclick="toggleMuteVoiceCall()">Mute</button>
+              <button class="timer-btn" onclick="toggleCameraVoiceCall()">Camera</button>
+              <button class="timer-btn" onclick="toggleScreenShare()">Share Screen</button>
+              <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
+            </div>
           </div>
         </div>
 
-        <div id="activeCallBar" style="display:none;background:var(--panel-raised);border:1px solid var(--signal);border-radius:8px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-          <div id="activeCallText" style="font-size:14px;color:var(--signal);"></div>
-          <div style="display:flex;gap:8px;">
-            <button class="timer-btn" id="muteCallBtn" onclick="toggleMuteVoiceCall()">Mute</button>
-            <button class="timer-btn" id="cameraCallBtn" onclick="toggleCameraVoiceCall()" style="display:none;">Camera Off</button>
-            <button class="timer-btn" id="screenShareBtn" onclick="toggleScreenShare()">Share Screen</button>
-            <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
-          </div>
-        </div>
-
-        <div id="videoCallArea" style="display:none;position:relative;background:#000;border-radius:8px;margin-bottom:14px;overflow:hidden;">
-          <video id="remoteCallVideo" autoplay playsinline style="width:100%;display:block;max-height:360px;object-fit:cover;background:#000;"></video>
-          <video id="localCallVideo" autoplay playsinline muted style="position:absolute;bottom:10px;right:10px;width:110px;border-radius:6px;border:2px solid var(--panel-raised);object-fit:cover;"></video>
-          <div id="callReactionsOverlay" style="position:absolute;inset:0;pointer-events:none;overflow:hidden;"></div>
-          <button id="fullscreenCallBtn" class="fullscreen-toggle-btn" onclick="toggleCallFullscreen()" title="Fullscreen">⛶</button>
-          <div style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px;">
-            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👍')">👍</button>
-            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('❤️')">❤️</button>
-            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('😂')">😂</button>
-            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('🎉')">🎉</button>
-            <button class="timer-btn" style="padding:4px 10px;font-size:16px;" onclick="sendCallReaction('👏')">👏</button>
-          </div>
-          <div class="fullscreen-only-controls">
-            <button class="timer-btn" onclick="toggleMuteVoiceCall()">Mute</button>
-            <button class="timer-btn" onclick="toggleCameraVoiceCall()">Camera</button>
-            <button class="timer-btn" onclick="toggleScreenShare()">Share Screen</button>
-            <button class="timer-btn" style="border-color:var(--accent-red);color:var(--accent-red);" onclick="endVoiceCall(true)">Hang Up</button>
-          </div>
-        </div>
-
-        <div id="dmConversationLog" style="background:var(--panel);border:1px solid var(--line);border-radius:8px;height:340px;overflow-y:auto;padding:16px;margin-bottom:14px;"></div>
-        <div id="dmTypingIndicator" style="font-size:12px;color:var(--slate-dim);min-height:16px;margin-bottom:6px;font-style:italic;"></div>
+        <div id="dmConversationLog" class="dm-log"></div>
+        <div id="dmTypingIndicator" class="dm-typing-indicator"></div>
         <div class="chat-input-row">
           <textarea id="dmInput" placeholder="Type a direct message..." oninput="handleDmTyping()" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendDirectMessage();}"></textarea>
           <button id="dmSendBtn" onclick="sendDirectMessage()">Send</button>
@@ -2431,6 +2552,23 @@
     applyChatModeToUI();
   }
 
+  function toggleChatOverflowMenu(){
+    const menu = document.getElementById('chatOverflowMenu');
+    if(menu) menu.classList.toggle('visible');
+  }
+
+  function closeChatOverflowMenu(){
+    const menu = document.getElementById('chatOverflowMenu');
+    if(menu) menu.classList.remove('visible');
+  }
+
+  document.addEventListener('click', (e) => {
+    const wrapper = document.querySelector('.chat-overflow-wrapper');
+    if(wrapper && !wrapper.contains(e.target)){
+      closeChatOverflowMenu();
+    }
+  });
+
   function applyChatModeToUI(){
     const mode = getChatMode();
     const btn = document.getElementById('modeToggleBtn');
@@ -2747,6 +2885,10 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
     }catch(e){ /* memory extraction is a courtesy — never let it disrupt the actual chat */ }
   }
 
+  let projectList = [];
+  let collapsedProjects = new Set(JSON.parse(localStorage.getItem('collapsedProjects') || '[]'));
+  let moveToProjectConvId = null;
+
   async function loadConversationList(){
     try{
       const response = await fetch('/__ai_conv_list', {
@@ -2757,7 +2899,51 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
       const data = await response.json();
       conversationList = Array.isArray(data.conversations) ? data.conversations : [];
     }catch(e){ conversationList = []; }
+    await loadProjectList();
     renderConversationList();
+    updateSidebarProfile();
+  }
+
+  async function loadProjectList(){
+    try{
+      const response = await fetch('/__ai_project_list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity() })
+      });
+      const data = await response.json();
+      projectList = Array.isArray(data.projects) ? data.projects : [];
+    }catch(e){ projectList = []; }
+  }
+
+  function updateSidebarProfile(){
+    const name = getUserDisplayName();
+    const avatarEl = document.getElementById('chatSidebarAvatar');
+    const nameEl = document.getElementById('chatSidebarName');
+    if(avatarEl) avatarEl.textContent = (name || '?').charAt(0).toUpperCase();
+    if(nameEl) nameEl.textContent = name;
+  }
+
+  function sortByPinnedThenRecency(list){
+    // Pinned items float to the top; JS's sort is stable, so recency order
+    // within each group (already sorted by the server) is preserved.
+    return [...list].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  }
+
+  function renderConvItemHtml(c){
+    return `
+      <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
+        <span class="chat-conv-title">${c.pinned ? '📌 ' : ''}${escapeHtml(c.title)}</span>
+        <div class="chat-conv-overflow-wrapper">
+          <button class="chat-conv-overflow-btn" onclick="event.stopPropagation();toggleConvOverflowMenu('${c.id}')">⋮</button>
+          <div class="chat-conv-overflow-menu" id="convOverflow-${c.id}">
+            <button onclick="event.stopPropagation();togglePinConversation('${c.id}');closeAllConvOverflowMenus();">${c.pinned ? 'Unpin' : 'Pin'}</button>
+            <button onclick="event.stopPropagation();startRenameConversation('${c.id}');closeAllConvOverflowMenus();">Rename</button>
+            <button onclick="event.stopPropagation();openMoveToProjectModal('${c.id}');closeAllConvOverflowMenus();">Move to project</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   function renderConversationList(){
@@ -2766,27 +2952,152 @@ Use type="docx" for reports, essays, letters, and anything long-form. Use type="
 
     const searchInput = document.getElementById('chatSearchInput');
     const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
-    let visible = query
+    const visible = query
       ? conversationList.filter(c => c.title.toLowerCase().includes(query))
       : conversationList;
 
-    // Pinned items float to the top; JS's sort is stable, so recency order
-    // within each group (already sorted by the server) is preserved.
-    visible = [...visible].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
-
-    if(visible.length === 0){
-      container.innerHTML = `<div class="chat-sidebar-empty">${query ? 'No chats match that search.' : 'No past chats yet.'}</div>`;
+    if(conversationList.length === 0){
+      container.innerHTML = `<div class="chat-sidebar-empty">No past chats yet.</div>`;
       return;
     }
-    container.innerHTML = visible.map(c => `
-      <div class="chat-conv-item ${c.id === currentConversationId ? 'active' : ''}" onclick="openConversation('${c.id}')">
-        <span class="chat-conv-title">${c.pinned ? '📌 ' : ''}${escapeHtml(c.title)}</span>
-        <div class="chat-conv-item-actions">
-          <button onclick="event.stopPropagation();togglePinConversation('${c.id}')" title="${c.pinned ? 'Unpin' : 'Pin'}">${c.pinned ? '📌' : '📍'}</button>
-          <button onclick="event.stopPropagation();startRenameConversation('${c.id}')" title="Rename">✏️</button>
+    if(visible.length === 0 && projectList.length === 0){
+      container.innerHTML = `<div class="chat-sidebar-empty">No chats match that search.</div>`;
+      return;
+    }
+
+    let html = '';
+
+    // Grouped by project, in the order they were created
+    for(const project of projectList){
+      const items = sortByPinnedThenRecency(visible.filter(c => c.projectId === project.id));
+      if(items.length === 0 && query) continue; // hide empty groups while actively searching
+      const isCollapsed = collapsedProjects.has(project.id);
+      html += `
+        <div class="chat-project-group ${isCollapsed ? 'collapsed' : ''}">
+          <div class="chat-project-header" onclick="toggleProjectCollapse('${project.id}')">
+            <div class="chat-project-header-left">
+              <span class="chat-project-caret">▾</span>
+              <span class="chat-project-header-title">${escapeHtml(project.name)}</span>
+            </div>
+            <div class="chat-conv-overflow-wrapper">
+              <button class="chat-conv-overflow-btn" style="display:block;" onclick="event.stopPropagation();toggleConvOverflowMenu('project-${project.id}')">⋮</button>
+              <div class="chat-conv-overflow-menu" id="convOverflow-project-${project.id}">
+                <button onclick="event.stopPropagation();renameProject('${project.id}');closeAllConvOverflowMenus();">Rename</button>
+                <button onclick="event.stopPropagation();deleteProject('${project.id}');closeAllConvOverflowMenus();">Delete project</button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-project-items">
+            ${items.length > 0 ? items.map(renderConvItemHtml).join('') : '<div class="chat-sidebar-empty" style="padding:4px 10px;">No chats yet</div>'}
+          </div>
         </div>
-      </div>
+      `;
+    }
+
+    // Ungrouped conversations sit below any project groups
+    const ungrouped = sortByPinnedThenRecency(visible.filter(c => !c.projectId));
+    html += ungrouped.map(renderConvItemHtml).join('');
+
+    container.innerHTML = html || `<div class="chat-sidebar-empty">No chats match that search.</div>`;
+  }
+
+  function toggleConvOverflowMenu(id){
+    const menu = document.getElementById('convOverflow-' + id);
+    const wasVisible = menu && menu.classList.contains('visible');
+    closeAllConvOverflowMenus();
+    if(menu && !wasVisible) menu.classList.add('visible');
+  }
+
+  function closeAllConvOverflowMenus(){
+    document.querySelectorAll('.chat-conv-overflow-menu.visible').forEach(m => m.classList.remove('visible'));
+  }
+
+  document.addEventListener('click', (e) => {
+    if(!e.target.closest('.chat-conv-overflow-wrapper')){
+      closeAllConvOverflowMenus();
+    }
+  });
+
+  function toggleProjectCollapse(id){
+    if(collapsedProjects.has(id)) collapsedProjects.delete(id);
+    else collapsedProjects.add(id);
+    localStorage.setItem('collapsedProjects', JSON.stringify([...collapsedProjects]));
+    renderConversationList();
+  }
+
+  async function createNewProject(){
+    const name = prompt('Name this project:');
+    if(!name || !name.trim()) return;
+    try{
+      await fetch('/__ai_project_create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), name: name.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function renameProject(id){
+    const existing = projectList.find(p => p.id === id);
+    const newName = prompt('Rename this project:', existing ? existing.name : '');
+    if(!newName || !newName.trim()) return;
+    try{
+      await fetch('/__ai_project_rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id, name: newName.trim() })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  async function deleteProject(id){
+    const existing = projectList.find(p => p.id === id);
+    if(!confirm(`Delete "${existing ? existing.name : 'this project'}"? Chats inside it won't be deleted, just moved back out.`)) return;
+    try{
+      await fetch('/__ai_project_delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id })
+      });
+    }catch(e){ /* ignore */ }
+    await loadConversationList();
+  }
+
+  function openMoveToProjectModal(convId){
+    moveToProjectConvId = convId;
+    const conv = conversationList.find(c => c.id === convId);
+    const listEl = document.getElementById('moveToProjectList');
+    if(!listEl) return;
+
+    let html = `<button class="move-to-project-option ${!conv || !conv.projectId ? 'current' : ''}" onclick="moveConversationToProject(null)">No Project</button>`;
+    html += projectList.map(p => `
+      <button class="move-to-project-option ${conv && conv.projectId === p.id ? 'current' : ''}" onclick="moveConversationToProject('${p.id}')">${escapeHtml(p.name)}</button>
     `).join('');
+    listEl.innerHTML = html;
+
+    const modal = document.getElementById('moveToProjectModal');
+    if(modal) modal.style.display = 'flex';
+  }
+
+  function closeMoveToProjectModal(){
+    const modal = document.getElementById('moveToProjectModal');
+    if(modal) modal.style.display = 'none';
+    moveToProjectConvId = null;
+  }
+
+  async function moveConversationToProject(projectId){
+    if(!moveToProjectConvId) return;
+    try{
+      await fetch('/__ai_conv_set_project', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: chatIdentity(), id: moveToProjectConvId, projectId })
+      });
+    }catch(e){ /* ignore */ }
+    closeMoveToProjectModal();
+    await loadConversationList();
   }
 
   async function togglePinConversation(id){
