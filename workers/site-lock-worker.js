@@ -43,6 +43,7 @@ async function deleteAllAiConversations(env, username) {
   await env.GUEST_KV.delete('ai_conv_index:' + key);
   await env.GUEST_KV.delete('ai_memory:' + key);
   await env.GUEST_KV.delete('pubkey:' + key);
+  await env.GUEST_KV.delete('ai_projects:' + key);
 }
 
 // Shared helper for all guest-facing lifecycle emails — granted, denied, revoked,
@@ -677,6 +678,103 @@ export default {
         const index = indexRaw ? JSON.parse(indexRaw) : [];
         const filtered = index.filter(c => c.id !== id);
         await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(filtered));
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_conv_set_project' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      const projectId = body.projectId || null; // null means "no project" / ungrouped
+      if (id) {
+        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+        const index = indexRaw ? JSON.parse(indexRaw) : [];
+        const entry = index.find(c => c.id === id);
+        if (entry) {
+          entry.projectId = projectId;
+          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
+        }
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_project_list' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const raw = await env.GUEST_KV.get('ai_projects:' + key);
+      const projects = raw ? JSON.parse(raw) : [];
+      return new Response(JSON.stringify({ projects }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_project_create' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const name = (body.name || '').trim().slice(0, 60);
+      if (!name) {
+        return new Response(JSON.stringify({ error: 'no name provided' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const raw = await env.GUEST_KV.get('ai_projects:' + key);
+      const projects = raw ? JSON.parse(raw) : [];
+      const project = { id: crypto.randomUUID(), name, createdAt: Date.now() };
+      projects.push(project);
+      await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(projects));
+      return new Response(JSON.stringify({ ok: true, project }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_project_rename' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      const newName = (body.name || '').trim().slice(0, 60);
+      if (id && newName) {
+        const raw = await env.GUEST_KV.get('ai_projects:' + key);
+        const projects = raw ? JSON.parse(raw) : [];
+        const project = projects.find(p => p.id === id);
+        if (project) {
+          project.name = newName;
+          await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(projects));
+        }
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/__ai_project_delete' && request.method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const key = aiHistoryKey(body.username);
+      const id = body.id || '';
+      if (id) {
+        const raw = await env.GUEST_KV.get('ai_projects:' + key);
+        const projects = raw ? JSON.parse(raw) : [];
+        const filtered = projects.filter(p => p.id !== id);
+        await env.GUEST_KV.put('ai_projects:' + key, JSON.stringify(filtered));
+
+        // Un-group any conversations that were in this project, rather than
+        // silently deleting the conversations themselves along with it
+        const indexRaw = await env.GUEST_KV.get('ai_conv_index:' + key);
+        const index = indexRaw ? JSON.parse(indexRaw) : [];
+        let changed = false;
+        for (const entry of index) {
+          if (entry.projectId === id) {
+            entry.projectId = null;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await env.GUEST_KV.put('ai_conv_index:' + key, JSON.stringify(index));
+        }
       }
       return new Response(JSON.stringify({ ok: true }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
