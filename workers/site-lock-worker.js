@@ -1026,6 +1026,7 @@ if (request.method === ‘POST’) {
 const formData = await request.formData();
 const username = formData.get(‘username’) || ‘’;
 const password = formData.get(‘password’) || ‘’;
+const rememberMe = !!formData.get(‘remember_me’);
 
 ```
 // Owner credentials
@@ -1040,9 +1041,11 @@ if (await isOwner(env, username, password)) {
     const allowedHubs = previewGuest ? (previewGuest.allowedHubs || []) : [];
     return serveSiteWithPoller(request, true, previewAs, allowedHubs, previewGuest?.firstName, previewGuest?.lastName);
   }
-  const token = await createSession(env, { isGuest: false });
   const response = await serveSiteWithPoller(request, false);
-  response.headers.append('Set-Cookie', sessionCookieHeader(token));
+  if (rememberMe) {
+    const token = await createSession(env, { isGuest: false });
+    response.headers.append('Set-Cookie', sessionCookieHeader(token));
+  }
   return response;
 }
 
@@ -1066,9 +1069,11 @@ if (raw) {
     guest.accessCount = (guest.accessCount || 0) + 1;
     guest.lastAccess = new Date().toISOString();
     await env.GUEST_KV.put('guest:' + username, JSON.stringify(guest));
-    const token = await createSession(env, { isGuest: true, username });
     const response = await serveSiteWithPoller(request, true, username, guest.allowedHubs, guest.firstName, guest.lastName);
-    response.headers.append('Set-Cookie', sessionCookieHeader(token));
+    if (rememberMe) {
+      const token = await createSession(env, { isGuest: true, username });
+      response.headers.append('Set-Cookie', sessionCookieHeader(token));
+    }
     return response;
   }
 }
@@ -2471,6 +2476,9 @@ return `<!DOCTYPE html>
   button{width:100%;background:#E0AC3F;color:#0E1B3D;border:none;padding:10px;border-radius:6px;
     font-weight:600;cursor:pointer;font-size:14px;}
   .error{color:#D9584F;font-size:12px;margin-bottom:12px;text-align:center;}
+  .remember-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+  .remember-row input{width:auto;margin:0;}
+  .remember-row label{color:#8B9BC4;font-size:12.5px;cursor:pointer;}
   .request-link{display:block;text-align:center;margin-top:16px;color:#8B9BC4;font-size:12px;text-decoration:none;}
   .request-link:hover{color:#E0AC3F;}
 </style>
@@ -2481,6 +2489,10 @@ return `<!DOCTYPE html>
     ${error ? `<div class="error">${error}</div>` : ''}
     <input type="text" name="username" placeholder="Username" autofocus required>
     <input type="password" name="password" placeholder="Password" required>
+    <div class="remember-row">
+      <input type="checkbox" name="remember_me" id="rememberMe">
+      <label for="rememberMe">Remember me on this device</label>
+    </div>
     <button type="submit">Enter</button>
     <a class="request-link" href="/signup">Don't have access? Request it</a>
   </form>
